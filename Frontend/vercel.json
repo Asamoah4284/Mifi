@@ -3,11 +3,11 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://api.tabitacum.cloud/api/:path*"
+      "destination": "https://api.mola-wifi.online/api/:path*"
     },
     {
       "source": "/ussd/:path*",
-      "destination": "https://api.tabitacum.cloud/ussd/:path*"
+      "destination": "https://api.mola-wifi.online/ussd/:path*"
     },
     {
       "source": "/(.*)",
