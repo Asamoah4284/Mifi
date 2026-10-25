@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Mifi Green 'M' with wifi arches and 4 window dots -->
+  <defs>
+    <clipPath id="m-clip">
+      <rect width="100" height="100" rx="20"/>
+    </clipPath>
+  </defs>
+
+  <!-- WiFi waves (top right) in #02A145 -->
+  <path d="M 68 28 A 20 20 0 0 1 88 48" stroke="#02A145" stroke-width="7" stroke-linecap="round" fill="none"/>
+  <path d="M 74 16 A 34 34 0 0 1 96 38" stroke="#02A145" stroke-width="7" stroke-linecap="round" fill="none"/>
+
+  <!-- Main M Shape -->
+  <path d="M 14 84 
+           C 14 84, 14 42, 28 42
+           C 36 42, 42 54, 46 66
+           C 50 54, 56 42, 64 42
+           C 78 42, 78 84, 78 84
+           C 78 87, 73 87, 71 84
+           C 71 84, 71 52, 64 52
+           C 58 52, 53 66, 49 78
+           C 47 82, 45 82, 43 78
+           C 39 66, 34 52, 28 52
+           C 21 52, 21 84, 21 84
+           Z" 
+        fill="#02A145"/>
+  
+  <!-- Bubble M body filled cleanly -->
+  <path d="M 12 85 C 12 40 24 30 35 30 C 43 30 48 38 52 50 C 56 38 61 30 69 30 C 80 30 88 42 88 85 C 88 88 80 88 78 85 C 78 52 72 42 66 42 C 60 42 55 56 53 72 C 52 76 48 76 47 72 C 45 56 40 42 34 42 C 28 42 22 52 22 85 C 22 88 12 88 12 85 Z" fill="#02A145"/>
+
+  <!-- 4 window squares in the right hump -->
+  <rect x="58" y="44" width="6" height="6" rx="1.5" fill="#ffffff"/>
+  <rect x="67" y="44" width="6" height="6" rx="1.5" fill="#ffffff"/>
+  <rect x="58" y="53" width="6" height="6" rx="1.5" fill="#ffffff"/>
+  <rect x="67" y="53" width="6" height="6" rx="1.5" fill="#ffffff"/>
+</svg>

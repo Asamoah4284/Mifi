@@ -1,0 +1,414 @@
+import * as React from "react"
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom"
+import { Lock, Loader2, UserPlus } from "lucide-react"
+import { useAuth } from "@/context/AuthContext.jsx"
+import { authSendSignupOtp } from "@/lib/api.js"
+import { getDefaultAppName } from "@/lib/env.js"
+import { PasswordField } from "@/components/auth/PasswordField.jsx"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+
+export default function Signup() {
+  const appName = getDefaultAppName()
+  const { isAuthenticated, authReady, signup } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const from = typeof location.state?.from === "string" ? location.state.from : "/"
+
+  const [step, setStep] = React.useState(/** @type {"form" | "verify"} */ ("form"))
+  const [name, setName] = React.useState("")
+  const [organizationName, setOrganizationName] = React.useState("")
+  const [email, setEmail] = React.useState("")
+  const [phone, setPhone] = React.useState("")
+  const [password, setPassword] = React.useState("")
+  const [confirmPassword, setConfirmPassword] = React.useState("")
+  const [otp, setOtp] = React.useState("")
+  const [error, setError] = React.useState(null)
+  const [submitting, setSubmitting] = React.useState(false)
+
+  if (!authReady) {
+    return (
+      <div className="text-foreground bg-canvas flex min-h-svh items-center justify-center dark:bg-background">
+        <Loader2 className="text-primary size-8 animate-spin" aria-label="Loading" />
+      </div>
+    )
+  }
+
+  if (isAuthenticated) {
+    return <Navigate to={from === "/signup" ? "/" : from} replace />
+  }
+
+  const handleSendCode = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (password !== confirmPassword) {
+      setError("mismatch")
+      return
+    }
+    if (name.trim().length < 2 || !email.trim().includes("@") || password.length < 6) {
+      setError("invalid")
+      return
+    }
+    if (!phone.trim()) {
+      setError("phone")
+      return
+    }
+    setSubmitting(true)
+    try {
+      const result = await authSendSignupOtp(phone.trim())
+      if (result.ok) {
+        setOtp("")
+        setStep("verify")
+        return
+      }
+      if (result.code === "exists") setError("phone_exists")
+      else if (result.code === "cooldown") setError("cooldown")
+      else if (result.code === "invalid") setError("sms_failed")
+      else setError("network")
+    } catch {
+      setError("network")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleVerifyAndSignup = async (e) => {
+    e.preventDefault()
+    setError(null)
+    if (!/^\d{6}$/.test(otp.trim())) {
+      setError("otp_format")
+      return
+    }
+    setSubmitting(true)
+    try {
+      const result = await signup(
+        name,
+        email,
+        phone.trim(),
+        password,
+        otp.trim(),
+        organizationName.trim() || undefined,
+      )
+      if (result === "ok") {
+        navigate(from === "/signup" || !from.startsWith("/") ? "/" : from, { replace: true })
+      } else if (result === "exists") {
+        setError("exists")
+      } else if (result === "phone_exists") {
+        setError("phone_exists")
+      } else if (result === "otp_invalid") {
+        setError("otp_invalid")
+      } else if (result === "network") {
+        setError("network")
+      } else {
+        setError("invalid")
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleResendCode = async () => {
+    setError(null)
+    setSubmitting(true)
+    try {
+      const result = await authSendSignupOtp(phone.trim())
+      if (!result.ok) {
+        if (result.code === "cooldown") setError("cooldown")
+        else if (result.code === "exists") setError("phone_exists")
+        else setError("sms_failed")
+      }
+    } catch {
+      setError("network")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const maskPhone = (value) => {
+    const s = value.trim()
+    if (s.length <= 6) return s
+    return `${s.slice(0, 4)}•••${s.slice(-3)}`
+  }
+
+  const errorMessage =
+    error === "mismatch"
+      ? "Passwords do not match. Re-enter them and try again."
+      : error === "exists"
+        ? "An account with this email already exists. Sign in instead."
+        : error === "phone_exists"
+          ? "An account with this phone already exists. Sign in instead."
+          : error === "phone"
+            ? "Enter a valid Ghana mobile number (e.g. 0241234567 or +233241234567)."
+            : error === "cooldown"
+              ? "Please wait a minute before requesting another code."
+              : error === "sms_failed"
+                ? "Could not send SMS. Check Moolre configuration on the server."
+                : error === "otp_format"
+                  ? "Enter the 6-digit code from your SMS."
+                  : error === "otp_invalid"
+                    ? "Invalid or expired code. Request a new code and try again."
+                    : error === "invalid"
+                      ? "Enter your full name (2+ characters), a valid email, phone, and a password of at least 6 characters."
+                      : error === "network"
+                        ? "Could not reach the server. Start the API and check your network connection."
+                        : null
+
+  return (
+    <div className="text-foreground relative flex min-h-svh flex-col items-center justify-start overflow-hidden bg-canvas px-4 pb-4 pt-4 sm:justify-center sm:p-6 sm:pb-6 sm:pt-6 dark:bg-background">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+        <div className="bg-primary/12 absolute -left-[20%] top-[-10%] h-[min(85vh,640px)] w-[min(85vw,640px)] rounded-full blur-[100px] dark:bg-primary/20" />
+        <div className="bg-primary/8 absolute -right-[15%] bottom-[-20%] h-[min(70vh,520px)] w-[min(75vw,520px)] rounded-full blur-[90px] dark:bg-primary/12" />
+        <div className="from-background/80 absolute inset-0 bg-gradient-to-b via-transparent to-canvas/90 dark:from-background dark:to-background" />
+        <div
+          className="absolute inset-0 opacity-[0.35] dark:opacity-[0.12]"
+          style={{
+            backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2302a145' fill-opacity='0.10'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
+          }}
+        />
+      </div>
+
+      <div className="relative z-10 flex w-full max-w-[440px] flex-col items-center">
+        <div className="mb-3 text-center sm:mb-4">
+          <img src="/logo.png" alt="Mifi" className="h-10 mx-auto mb-2 object-contain" />
+          <h1 className="text-foreground mt-1 text-2xl font-bold tracking-tight dark:text-foreground sm:text-[1.75rem] sm:leading-tight">
+            Create your workspace
+          </h1>
+          <p className="text-muted-foreground mx-auto mt-1 max-w-[340px] text-xs leading-snug dark:text-muted-foreground sm:mt-1.5 sm:text-sm sm:leading-snug">
+            Create your WiFi group's private dashboard. You become the group admin; add sales agents later from Users.
+          </p>
+        </div>
+
+        <Card className="border-border/70 w-full gap-0 overflow-hidden rounded-xl border bg-card/90 py-0 shadow-[0_20px_60px_-24px_rgba(2,161,69,0.28),0_8px_28px_-14px_rgba(15,23,42,0.1)] ring-1 ring-black/[0.04] backdrop-blur-md dark:bg-card/85 dark:shadow-[0_28px_90px_-32px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.06)] dark:ring-white/[0.08] sm:rounded-2xl sm:shadow-[0_28px_90px_-28px_rgba(2,161,69,0.32),0_12px_40px_-18px_rgba(15,23,42,0.12)]">
+          <div className="bg-primary h-0.5 w-full" aria-hidden />
+
+          <CardHeader className="space-y-2 px-4 pb-0 pt-3 text-center sm:space-y-3 sm:px-6 sm:pb-1 sm:pt-5">
+            <div className="relative mx-auto">
+              <div className="border-primary/15 bg-card relative flex size-11 items-center justify-center rounded-lg border shadow-md ring-2 ring-primary/20 dark:border-border dark:bg-muted/30 dark:ring-primary/25 sm:size-14 sm:rounded-xl">
+                <UserPlus className="text-primary size-5 stroke-[1.5] dark:text-primary sm:size-7" aria-hidden />
+              </div>
+            </div>
+            <div className="space-y-0.5 sm:space-y-1">
+              <CardTitle className="font-heading text-base font-semibold tracking-tight sm:text-xl">Create account</CardTitle>
+              <CardDescription className="text-muted-foreground text-[11px] leading-snug dark:text-muted-foreground sm:text-xs sm:leading-snug">
+                {step === "form"
+                  ? "Set up your WiFi group and administrator profile. We will text a verification code to your phone."
+                  : `Enter the 6-digit code sent to ${maskPhone(phone)}.`}
+              </CardDescription>
+            </div>
+          </CardHeader>
+
+          <CardContent className="px-4 pb-0 pt-0 sm:px-6 sm:pb-1">
+            {step === "form" ? (
+            <form onSubmit={handleSendCode} className="space-y-2.5 sm:space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-org" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  WiFi group name
+                </Label>
+                <Input
+                  id="signup-org"
+                  name="organizationName"
+                  type="text"
+                  autoComplete="organization"
+                  value={organizationName}
+                  onChange={(e) => setOrganizationName(e.target.value)}
+                  placeholder="e.g. EverGreen Hostels"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                />
+                <p className="text-muted-foreground text-[10px] leading-snug sm:text-xs">
+                  Your sales, locations, packages, and finance stay private to this group.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-name" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Full name
+                </Label>
+                <Input
+                  id="signup-name"
+                  name="name"
+                  type="text"
+                  autoComplete="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Jane Admin"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-email" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Email
+                </Label>
+                <Input
+                  id="signup-email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@company.com"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-phone" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Mobile number
+                </Label>
+                <Input
+                  id="signup-phone"
+                  name="phone"
+                  type="tel"
+                  autoComplete="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="0241234567 or +233241234567"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-password" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Password
+                </Label>
+                <PasswordField
+                  id="signup-password"
+                  name="password"
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="At least 6 characters"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-confirm" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Confirm password
+                </Label>
+                <PasswordField
+                  id="signup-confirm"
+                  name="confirmPassword"
+                  autoComplete="new-password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Re-enter your password"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-sm shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg sm:text-sm"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              {errorMessage ? (
+                <p id="signup-error" className="text-destructive bg-destructive/8 rounded-md px-2 py-1 text-[11px] leading-snug dark:bg-destructive/15 sm:px-2.5 sm:py-1.5 sm:text-xs sm:leading-normal" role="alert">
+                  {errorMessage}
+                </p>
+              ) : null}
+              <Button
+                type="submit"
+                size="lg"
+                disabled={submitting}
+                className="h-9 w-full rounded-md text-sm font-semibold shadow-md shadow-primary/20 transition-[box-shadow,transform] hover:shadow-lg hover:shadow-primary/25 active:scale-[0.99] disabled:opacity-70 dark:shadow-primary/10 dark:hover:shadow-primary/20 sm:h-10 sm:rounded-lg"
+              >
+                {submitting ? "Sending code…" : "Send verification code"}
+              </Button>
+            </form>
+            ) : (
+            <form onSubmit={handleVerifyAndSignup} className="space-y-2.5 sm:space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="signup-otp" className="text-foreground text-xs font-medium dark:text-foreground sm:text-sm">
+                  Verification code
+                </Label>
+                <Input
+                  id="signup-otp"
+                  name="otp"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="123456"
+                  className="border-border/80 bg-background/80 h-9 rounded-md text-center text-lg tracking-[0.35em] shadow-none transition-shadow focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/25 dark:border-border dark:bg-background/50 dark:focus-visible:ring-primary/30 sm:h-10 sm:rounded-lg"
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? "signup-error" : undefined}
+                />
+              </div>
+              {errorMessage ? (
+                <p id="signup-error" className="text-destructive bg-destructive/8 rounded-md px-2 py-1 text-[11px] leading-snug dark:bg-destructive/15 sm:px-2.5 sm:py-1.5 sm:text-xs sm:leading-normal" role="alert">
+                  {errorMessage}
+                </p>
+              ) : null}
+              <Button
+                type="submit"
+                size="lg"
+                disabled={submitting}
+                className="h-9 w-full rounded-md text-sm font-semibold shadow-md shadow-primary/20 transition-[box-shadow,transform] hover:shadow-lg hover:shadow-primary/25 active:scale-[0.99] disabled:opacity-70 dark:shadow-primary/10 dark:hover:shadow-primary/20 sm:h-10 sm:rounded-lg"
+              >
+                {submitting ? "Creating…" : "Verify and create account"}
+              </Button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={submitting}
+                  className="flex-1"
+                  onClick={() => {
+                    setStep("form")
+                    setError(null)
+                  }}
+                >
+                  Back
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={submitting}
+                  className="flex-1"
+                  onClick={handleResendCode}
+                >
+                  Resend code
+                </Button>
+              </div>
+            </form>
+            )}
+          </CardContent>
+
+          <CardFooter className="border-border/60 bg-muted/40 flex flex-col gap-0.5 rounded-b-xl border-t px-4 py-2 sm:rounded-b-2xl sm:px-6 sm:py-2.5 dark:border-border/60 dark:bg-muted/25">
+            <div className="text-muted-foreground flex items-center justify-center gap-1.5 text-[10px] font-medium dark:text-muted-foreground sm:text-[11px]">
+              <Lock className="size-3 shrink-0 opacity-70" aria-hidden />
+              <span>API sign-up</span>
+            </div>
+            <p className="text-muted-foreground text-center text-[10px] leading-snug dark:text-muted-foreground sm:text-[11px] sm:leading-relaxed">
+              Phone verification uses Moolre SMS from the API. JWT is stored in session storage.
+            </p>
+          </CardFooter>
+        </Card>
+
+        <p className="text-muted-foreground mt-3 text-center text-xs dark:text-muted-foreground sm:mt-4">
+          Already have an account?{" "}
+          <Link to="/login" className="text-primary font-medium underline-offset-4 hover:underline dark:text-primary">
+            Sign in
+          </Link>
+        </p>
+
+        <p className="text-muted-foreground mt-1.5 max-w-sm text-center text-[10px] leading-snug dark:text-muted-foreground sm:mt-2 sm:text-[11px] sm:leading-relaxed">
+          This is a front-end demo. Do not reuse these credentials in production.
+        </p>
+      </div>
+    </div>
+  )
+}

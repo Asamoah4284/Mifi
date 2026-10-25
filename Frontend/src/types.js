@@ -1,0 +1,37 @@
+/**
+ * @typedef {Object} AuthUser
+ * @property {string} [id]
+ * @property {string} name
+ * @property {string} email
+ * @property {string} [phone]
+ * @property {string} role
+ * @property {string} [orgId]
+ */
+
+/**
+ * @typedef {Object} TeamUserRow
+ * @property {string} id
+ * @property {string} name
+ * @property {string} email
+ * @property {string} role
+ * @property {boolean} active
+ * @property {string} [locationId]
+ * @property {string} [locationName]
+ */
+
+/**
+ * @typedef {Object} Sale
+ * @property {string} id
+ * @property {string} customerName
+ * @property {string} [customerPhone]
+ * @property {string} [paymentNumber]
+ * @property {string} [soldAt] ISO timestamp when the sale was recorded
+ * @property {string} packageType
+ * @property {number} amount
+ * @property {string} locationId
+ * @property {string} date
+ * @property {'Completed'|'Pending'|'Cancelled'} status
+ * @property {string} [voucherCode]
+ */
+
+export {}

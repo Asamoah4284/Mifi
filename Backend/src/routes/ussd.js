@@ -1,0 +1,728 @@
+import express from "express"
+import {
+  USSD_SHORTCODE,
+  formatPhoneNumber,
+  generatePaymentReference,
+  getUssdPayload,
+  initiateMoMoPayment,
+  normalizeNetworkName,
+  normalizeUssdPayload,
+  verifyMoolreWebhook,
+} from "../lib/ussdHelpers.js"
+import { createUssdSessionStore } from "../lib/ussdSessionStore.js"
+import { checkMoolrePaymentStatus, scheduleUssdPaymentStatusPoll } from "../lib/moolrePaymentStatus.js"
+import { getMoolreWebhookPayload, parseMoolrePaymentEvent } from "../lib/moolreWebhook.js"
+import {
+  fulfillUssdVoucherSale,
+} from "../services/voucherSaleFulfillment.js"
+import { sendUssdVoucherSms } from "../services/ussdVoucherSms.js"
+import { isAgentPaymentReference, processAgentMomoPaymentSuccess } from "../lib/agentMomoPayment.js"
+import { isCaptivePaymentReference, processCaptiveMomoPaymentSuccess } from "../lib/captiveMomoPayment.js"
+import { resolvePortalOrgId } from "../lib/organizations.js"
+import { getLocationsWithStock, getPackagesForLocation } from "../services/portalCatalog.js"
+import { findRecentVouchersForPhone } from "../services/voucherRetrieve.js"
+import { buyLog, buyError, errorForLog } from "../lib/buyLog.js"
+
+// Upper cap on how many active packages we fetch per location. USSD sessions are short-lived
+// so this only bounds the DB result size — the actual menu is paginated below.
+const MAX_PACKAGES_IN_MENU = 24
+const MAX_LOCATIONS_IN_MENU = 8
+// USSD turns are limited to ~160–180 characters by most gateways, so we paginate package lists
+// and surface a trailing "More" entry to advance to the next page.
+const PACKAGES_PER_PAGE = 4
+
+/**
+ * @param {{
+ *   ussdSessions: import("mongodb").Collection
+ *   agentPaymentPending: import("mongodb").Collection
+ *   packages: import("mongodb").Collection
+ *   vouchers: import("mongodb").Collection
+ *   sales: import("mongodb").Collection
+ *   auditLogs: import("mongodb").Collection
+ *   locations: import("mongodb").Collection
+ * }} deps
+ */
+export function createUssdRouter(deps) {
+  const { ussdSessions, agentPaymentPending, packages, vouchers, sales, auditLogs, locations } = deps
+  const sessions = createUssdSessionStore(ussdSessions)
+  const router = express.Router()
+
+  /** Fallback when session has no location (legacy). Does not limit the location menu. */
+  function getUssdFallbackLocationId() {
+    return String(process.env.USSD_DEFAULT_LOCATION_ID || "").trim()
+  }
+
+  /**
+   * Fulfill voucher sale + SMS after Moolre confirms payment (webhook or status poll).
+   * @param {string} paymentReference
+   * @param {string} source
+   */
+  async function processUssdPaymentSuccess(paymentReference, source = "webhook") {
+    const existingSale = await sales.findOne({ paymentReference })
+    if (existingSale) {
+      console.log(`[ussd-pay] ${source} idempotent`, paymentReference, existingSale._id)
+      if (existingSale.voucherCode && existingSale.customerPhone && existingSale.smsSent !== true) {
+        const sms = await sendUssdVoucherSms({
+          to: String(existingSale.customerPhone),
+          packageName: String(existingSale.packageType || "WiFi"),
+          voucherCode: String(existingSale.voucherCode),
+        })
+        if (sms.success) {
+          await sales.updateOne({ _id: existingSale._id }, { $set: { smsSent: true } })
+        }
+      }
+      return { ok: true, status: "already_processed", saleId: existingSale._id }
+    }
+
+    if (isAgentPaymentReference(paymentReference)) {
+      console.log(`[ussd-pay] ${source} routing agent MoMo ref`, paymentReference)
+      return processAgentMomoPaymentSuccess({
+        pending: agentPaymentPending,
+        packages,
+        vouchers,
+        sales,
+        auditLogs,
+        paymentReference,
+        source,
+      })
+    }
+
+    if (isCaptivePaymentReference(paymentReference)) {
+      buyLog("webhook routing captive", { paymentReference, source })
+      console.log(`[ussd-pay] ${source} routing captive MoMo ref`, paymentReference)
+      return processCaptiveMomoPaymentSuccess({
+        pending: agentPaymentPending,
+        packages,
+        vouchers,
+        sales,
+        auditLogs,
+        paymentReference,
+        source,
+      })
+    }
+
+    const ussdSession = await sessions.findByPaymentReference(paymentReference)
+    if (!ussdSession) {
+      console.warn(`[ussd-pay] ${source} no session for`, paymentReference)
+      return { ok: false, status: "no_session" }
+    }
+
+    const selected = ussdSession.selectedPackage
+    const packageId = selected?.packageId
+    const locationId = ussdSession.locationId || getUssdFallbackLocationId()
+    const customerPhone = ussdSession.phone
+
+    if (!packageId || !locationId || !customerPhone) {
+      console.error(`[ussd-pay] ${source} invalid session`, paymentReference)
+      return { ok: false, status: "invalid_session" }
+    }
+
+    const locDoc = await locations.findOne({ _id: String(locationId) }, { projection: { orgId: 1 } })
+    const orgId = typeof locDoc?.orgId === "string" ? locDoc.orgId.trim() : ""
+
+    const result = await fulfillUssdVoucherSale({
+      packages,
+      vouchers,
+      sales,
+      auditLogs,
+      paymentReference,
+      customerPhone: String(customerPhone),
+      packageId: String(packageId),
+      locationId: String(locationId),
+      ...(orgId ? { orgId } : {}),
+    })
+
+    await sessions.updateSession(String(ussdSession._id), { step: "completed" })
+
+    if (!result.ok) {
+      console.error(`[ussd-pay] ${source} fulfillment failed`, paymentReference, result.error)
+      return { ok: false, status: "fulfillment_failed", error: result.error }
+    }
+
+    console.log(
+      `[ussd-pay] ${source} success`,
+      paymentReference,
+      result.voucherCode,
+      "smsSent=",
+      result.smsSent,
+    )
+    return {
+      ok: true,
+      status: "success",
+      saleId: result.sale?._id,
+      voucherCode: result.voucherCode,
+      smsSent: result.smsSent,
+    }
+  }
+
+  /** @param {string} paymentReference */
+  async function tryConfirmPaymentFromPoll(paymentReference) {
+    const existing = await sales.findOne({ paymentReference })
+    if (existing) return true
+
+    const status = await checkMoolrePaymentStatus(paymentReference)
+    console.log("[ussd-poll] status", paymentReference, status)
+    if (!status.ok || !status.isPaid) return false
+
+    const outcome = await processUssdPaymentSuccess(paymentReference, "poll")
+    return outcome.ok === true
+  }
+
+  function menuWelcome() {
+    return `WELCOME TO TABITACUM-WIFI\n1) Buy voucher\n2) Retrieve voucher\n3) Exit\n`
+  }
+
+  /**
+   * Build the "Retrieve voucher" USSD response from the caller's recent sales.
+   * @param {string} formattedPhone
+   */
+  async function buildRetrieveVoucherResponse(formattedPhone) {
+    const items = await findRecentVouchersForPhone(sales, formattedPhone)
+    if (items.length === 0) {
+      return {
+        message:
+          "No vouchers found for this number.\nIf you just paid, wait a moment and dial again, or contact support.",
+        reply: false,
+      }
+    }
+    const [latest, ...older] = items
+    const lines = [
+      "Your voucher:",
+      latest.voucherCode,
+      `${latest.packageName}${latest.date ? ` - ${latest.date}` : ""}`,
+    ]
+    if (older.length > 0) {
+      lines.push("", "Earlier:")
+      for (const v of older) {
+        lines.push(`- ${v.voucherCode}${v.date ? ` (${v.date})` : ""}`)
+      }
+    }
+    return { message: lines.join("\n"), reply: false }
+  }
+
+  /** @param {string} [orgId] */
+  function readUssdOrgId(orgId) {
+    return resolvePortalOrgId(orgId)
+  }
+
+  /** @param {string} [orgId] */
+  async function getLocationsForUssdMenu(orgId) {
+    return getLocationsWithStock(locations, vouchers, {
+      maxLocations: MAX_LOCATIONS_IN_MENU,
+      orgId: readUssdOrgId(orgId),
+    })
+  }
+
+  /** @param {string} locationId @param {string} [orgId] */
+  async function getPackagesForUssdMenu(locationId, orgId) {
+    return getPackagesForLocation(packages, vouchers, locationId, {
+      maxPackages: MAX_PACKAGES_IN_MENU,
+      orgId: readUssdOrgId(orgId),
+    })
+  }
+
+  // Hard cap on how many characters of a package name we render in the USSD menu.
+  // Keeps the per-line length predictable so 4 entries + "5) More" + the location header
+  // all fit within a single USSD turn (~160 chars).
+  const PACKAGE_NAME_MAX_LEN = 22
+
+  /**
+   * @param {string} name
+   */
+  function shortenPackageName(name) {
+    const t = typeof name === "string" ? name.trim() : ""
+    if (!t) return ""
+    if (t.length <= PACKAGE_NAME_MAX_LEN) return t
+    return `${t.slice(0, PACKAGE_NAME_MAX_LEN - 1).trimEnd()}…`
+  }
+
+  /**
+   * Format a price as "GHS{N}" — drops the decimal when whole, keeps two places otherwise.
+   * @param {number | string} value
+   */
+  function formatPriceForUssd(value) {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return "GHS?"
+    if (Number.isInteger(n)) return `GHS${n}`
+    return `GHS${n.toFixed(2).replace(/\.?0+$/, "")}`
+  }
+
+  /**
+   * Build one page of the package menu plus a trailing "More" entry when more pages remain.
+   * The "More" option always takes the next slot after the visible packages on this page.
+   *
+   * @param {{ name: string, priceGHS: number }[]} packageList
+   * @param {number} page
+   * @returns {{ lines: string[], pageSize: number, hasMore: boolean, moreOption: number }}
+   */
+  function buildPackageMenuPage(packageList, page) {
+    const safePage = Number.isFinite(page) && page >= 0 ? Math.floor(page) : 0
+    const start = safePage * PACKAGES_PER_PAGE
+    const slice = packageList.slice(start, start + PACKAGES_PER_PAGE)
+    const lines = slice.map(
+      (p, i) => `${i + 1}) ${shortenPackageName(p.name)} ${formatPriceForUssd(p.priceGHS)}`,
+    )
+    const hasMore = start + slice.length < packageList.length
+    if (hasMore) lines.push(`${slice.length + 1}) More`)
+    return { lines, pageSize: slice.length, hasMore, moreOption: slice.length + 1 }
+  }
+
+  /**
+   * @param {string} sessionId
+   * @param {string} locationId
+   */
+  async function beginPackageSelection(sessionId, locationId) {
+    const loc = await locations.findOne({ _id: locationId })
+    if (!loc) {
+      return {
+        message: "Location not available. Try again later.",
+        reply: false,
+      }
+    }
+
+    const packageList = await getPackagesForUssdMenu(locationId)
+    if (packageList.length === 0) {
+      return {
+        message: "No vouchers available at this location. Try another location or try again later.",
+        reply: false,
+      }
+    }
+
+    await sessions.updateSession(sessionId, {
+      step: "select_package",
+      locationId,
+      packageList,
+      packagePage: 0,
+    })
+
+    const locName = typeof loc.name === "string" && loc.name.trim() ? loc.name.trim() : locationId
+    const { lines } = buildPackageMenuPage(packageList, 0)
+    return {
+      message: `${locName}\nSelect package:\n${lines.join("\n")}`,
+      reply: true,
+    }
+  }
+
+  /**
+   * After user chooses Buy voucher: pick location (if needed) or go straight to packages.
+   * @param {string} sessionId
+   */
+  async function beginBuyFlow(sessionId) {
+    const locationList = await getLocationsForUssdMenu()
+    if (locationList.length === 0) {
+      return {
+        message: "No vouchers available right now. Try again later.",
+        reply: false,
+      }
+    }
+    if (locationList.length === 1) {
+      return beginPackageSelection(sessionId, locationList[0].locationId)
+    }
+    await sessions.updateSession(sessionId, { step: "select_location", locationList })
+    const lines = locationList.map((l, i) => `${i + 1}) ${l.name}`)
+    return {
+      message: `Select wifi location:\n${lines.join("\n")}`,
+      reply: true,
+    }
+  }
+
+  router.get("/health", async (_req, res) => {
+    try {
+      const locationList = await getLocationsForUssdMenu()
+      res.json({
+        status: "ok",
+        service: "Starexpress-ussd",
+        shortcode: USSD_SHORTCODE,
+        fallbackLocationId: getUssdFallbackLocationId() || null,
+        locationsWithStock: locationList.length,
+        timestamp: new Date().toISOString(),
+      })
+    } catch (err) {
+      res.json({
+        status: "ok",
+        service: "Starexpress-ussd",
+        shortcode: USSD_SHORTCODE,
+        timestamp: new Date().toISOString(),
+      })
+    }
+  })
+
+  router.get("/locations", async (req, res) => {
+    try {
+      const orgId = readUssdOrgId(
+        typeof req.query?.org === "string" ? req.query.org : req.query?.orgId,
+      )
+      const locationList = await getLocationsForUssdMenu(orgId)
+      res.json({ locations: locationList, org: orgId })
+    } catch (err) {
+      console.error("[ussd] GET /locations", err)
+      res.status(500).json({ error: "Failed to load locations." })
+    }
+  })
+
+  router.get("/packages", async (req, res) => {
+    try {
+      const orgId = readUssdOrgId(
+        typeof req.query?.org === "string" ? req.query.org : req.query?.orgId,
+      )
+      const queryLocationId =
+        typeof req.query?.locationId === "string" ? req.query.locationId.trim() : ""
+      const locationList = await getLocationsForUssdMenu(orgId)
+
+      if (queryLocationId) {
+        const loc = await locations.findOne({ _id: queryLocationId, orgId })
+        if (!loc) return res.status(404).json({ error: "Unknown location." })
+        const items = await getPackagesForUssdMenu(queryLocationId, orgId)
+        return res.json({
+          shortcode: USSD_SHORTCODE,
+          locationId: queryLocationId,
+          locationName: typeof loc.name === "string" ? loc.name : queryLocationId,
+          packages: items,
+          org: orgId,
+        })
+      }
+
+      const withPackages = await Promise.all(
+        locationList.map(async (entry) => {
+          const items = await getPackagesForUssdMenu(entry.locationId, orgId)
+          return { ...entry, packages: items }
+        }),
+      )
+
+      res.json({
+        shortcode: USSD_SHORTCODE,
+        locations: withPackages,
+      })
+    } catch (err) {
+      console.error("[ussd] GET /packages", err)
+      res.status(500).json({ error: "Failed to load packages." })
+    }
+  })
+
+  router.post("/", async (req, res) => {
+    try {
+      const rawPayload = getUssdPayload(req)
+      const { sessionId, isNewSession, msisdn, network, userInput } = normalizeUssdPayload(rawPayload)
+
+      console.log("[ussd] request", {
+        sessionId,
+        isNewSession,
+        msisdn: msisdn ? `${String(msisdn).slice(0, 6)}…` : null,
+        network,
+        input: String(userInput || "").slice(0, 40),
+      })
+
+      if (!sessionId || !msisdn) {
+        return res.json({ message: "Invalid request. Please try again.", reply: false })
+      }
+
+      const phone = formatPhoneNumber(msisdn)
+      if (!phone) {
+        return res.json({ message: "Invalid phone number.", reply: false })
+      }
+
+      const normalizedNetwork = normalizeNetworkName(network, msisdn)
+      const moolreNetworkNum = network != null ? Number(network) : null
+      const validMoolreNetwork =
+        moolreNetworkNum === 3 || moolreNetworkNum === 5 || moolreNetworkNum === 6 ? moolreNetworkNum : null
+
+      const isNew =
+        isNewSession === true ||
+        isNewSession === "true" ||
+        isNewSession === 1 ||
+        isNewSession === "1"
+
+      if (isNew) {
+        await sessions.createSession({
+          sessionId,
+          phone,
+          network: normalizedNetwork,
+          moolreNetwork: validMoolreNetwork,
+          step: "menu",
+        })
+        return res.json({ message: menuWelcome(), reply: true })
+      }
+
+      let session = await sessions.findSession(sessionId)
+      if (!session) {
+        await sessions.createSession({
+          sessionId,
+          phone,
+          network: normalizedNetwork,
+          moolreNetwork: validMoolreNetwork,
+          step: "menu",
+        })
+        return res.json({ message: menuWelcome(), reply: true })
+      }
+
+      if (validMoolreNetwork != null) {
+        await sessions.updateSession(sessionId, { moolreNetwork: validMoolreNetwork })
+        session = await sessions.findSession(sessionId)
+      }
+
+      const input = String(userInput || "").trim()
+      const step = session?.step || "menu"
+
+      switch (step) {
+        case "menu": {
+          if (input === "1") {
+            const buyFlow = await beginBuyFlow(sessionId)
+            return res.json(buyFlow)
+          }
+          if (input === "2") {
+            const retrieveResponse = await buildRetrieveVoucherResponse(phone)
+            await sessions.updateSession(sessionId, { step: "completed" })
+            return res.json(retrieveResponse)
+          }
+          if (input === "3") {
+            await sessions.updateSession(sessionId, { step: "completed" })
+            return res.json({
+              message: "Thank you for using Starexpress. Goodbye!",
+              reply: false,
+            })
+          }
+          return res.json({
+            message: `Invalid option.\n${menuWelcome()}`,
+            reply: true,
+          })
+        }
+
+        case "select_location": {
+          const locationList = Array.isArray(session?.locationList) ? session.locationList : []
+          const num = parseInt(input, 10)
+          if (!Number.isFinite(num) || num < 1 || num > locationList.length) {
+            const lines = locationList.map((/** @type {{ name: string }} */ l, i) => `${i + 1}) ${l.name}`)
+            return res.json({
+              message: `Invalid option.\nSelect wifi location:\n${lines.join("\n")}`,
+              reply: true,
+            })
+          }
+          const chosenLoc = locationList[num - 1]
+          const packageStep = await beginPackageSelection(sessionId, chosenLoc.locationId)
+          return res.json(packageStep)
+        }
+
+        case "select_package": {
+          const packageList = Array.isArray(session?.packageList) ? session.packageList : []
+          const currentPage =
+            Number.isFinite(Number(session?.packagePage)) && Number(session?.packagePage) >= 0
+              ? Math.floor(Number(session.packagePage))
+              : 0
+          const { pageSize, hasMore, moreOption } = buildPackageMenuPage(packageList, currentPage)
+          const num = parseInt(input, 10)
+
+          if (hasMore && Number.isFinite(num) && num === moreOption) {
+            const nextPage = currentPage + 1
+            await sessions.updateSession(sessionId, { packagePage: nextPage })
+            const next = buildPackageMenuPage(packageList, nextPage)
+            return res.json({
+              message: `Select package:\n${next.lines.join("\n")}`,
+              reply: true,
+            })
+          }
+
+          if (!Number.isFinite(num) || num < 1 || num > pageSize) {
+            const { lines } = buildPackageMenuPage(packageList, currentPage)
+            return res.json({
+              message: `Invalid option.\nSelect package:\n${lines.join("\n")}`,
+              reply: true,
+            })
+          }
+
+          const fullIndex = currentPage * PACKAGES_PER_PAGE + (num - 1)
+          const chosen = packageList[fullIndex]
+          await sessions.updateSession(sessionId, {
+            step: "confirm_pay",
+            selectedPackage: {
+              packageId: chosen.packageId,
+              name: chosen.name,
+              priceGHS: chosen.priceGHS,
+              dataLimit: chosen.dataLimit || "",
+            },
+          })
+          const limitLine = chosen.dataLimit ? `\nData: ${chosen.dataLimit}` : ""
+          return res.json({
+            message: `${chosen.name}${limitLine}\nPrice: GHS ${chosen.priceGHS}\n1) Pay\n2) Cancel`,
+            reply: true,
+          })
+        }
+
+        case "confirm_pay": {
+          const selected = session?.selectedPackage
+          if (!selected?.packageId) {
+            return res.json({
+              message: `Session expired. Dial ${USSD_SHORTCODE} to start again.`,
+              reply: false,
+            })
+          }
+
+          if (input === "1") {
+            const paymentReference = generatePaymentReference(sessionId)
+            const amount = Number(selected.priceGHS) || 0
+            if (amount <= 0) {
+              return res.json({ message: "Invalid package price. Contact support.", reply: false })
+            }
+
+            const payLocationId = String(session?.locationId || "").trim()
+            if (!payLocationId) {
+              return res.json({
+                message: `Session expired. Dial ${USSD_SHORTCODE} to start again.`,
+                reply: false,
+              })
+            }
+
+            await sessions.updateSession(sessionId, {
+              paymentReference,
+              step: "payment",
+              selectedPackage: session?.selectedPackage || selected,
+              phone,
+              locationId: payLocationId,
+            })
+
+            const moolreNet = session?.moolreNetwork ?? validMoolreNetwork
+            const momoDelayMs = Number(process.env.USSD_MOMO_START_DELAY_MS) || 1500
+            setTimeout(() => {
+              initiateMoMoPayment(phone, amount, sessionId, {
+                packageName: selected.name,
+                reference: paymentReference,
+                network: session?.network || normalizedNetwork,
+                moolreNetwork: moolreNet,
+              })
+                .then((result) => {
+                  console.log(
+                    "[ussd] momo result",
+                    paymentReference,
+                    result?.success,
+                    result?.action,
+                    result?.moolreCode,
+                    result?.message,
+                  )
+                  if (!result?.success) {
+                    console.error("[ussd] momo failed — user will not see PIN prompt:", result?.message)
+                    return
+                  }
+                  scheduleUssdPaymentStatusPoll(paymentReference, tryConfirmPaymentFromPoll)
+                })
+                .catch((err) => {
+                  console.error("[ussd] momo error", paymentReference, err)
+                })
+            }, momoDelayMs)
+
+            return res.json({
+              message:
+                "Approve the MoMo payment on your phone. You will receive an SMS with your WiFi voucher.",
+              reply: false,
+            })
+          }
+
+          if (input === "2") {
+            await sessions.updateSession(sessionId, { step: "completed" })
+            return res.json({
+              message: "Purchase cancelled. Thank you for using Starexpress.",
+              reply: false,
+            })
+          }
+
+          const limitLine = selected.dataLimit ? `\nData: ${selected.dataLimit}` : ""
+          return res.json({
+            message: `Invalid option.\n${selected.name}${limitLine}\nPrice: GHS ${selected.priceGHS}\n1) Pay\n2) Cancel`,
+            reply: true,
+          })
+        }
+
+        case "payment":
+          await sessions.updateSession(sessionId, { step: "completed" })
+          return res.json({
+            message: "Payment is processing. Check your phone for the MoMo prompt.",
+            reply: false,
+          })
+
+        case "completed":
+          return res.json({
+            message: `Session ended. Dial ${USSD_SHORTCODE} to buy again.`,
+            reply: false,
+          })
+
+        default:
+          await sessions.updateSession(sessionId, { step: "menu" })
+          return res.json({ message: menuWelcome(), reply: true })
+      }
+    } catch (err) {
+      console.error("[ussd] callback error", err)
+      return res.json({ message: "An error occurred. Please try again.", reply: false })
+    }
+  })
+
+  /** Moolre wallet callback + payment confirmation (As-market pattern). */
+  async function handleMoolrePaymentWebhook(req, res) {
+    try {
+      const payload = getMoolreWebhookPayload(req)
+      const event = parseMoolrePaymentEvent(payload)
+
+      console.log("[moolre-webhook] received", {
+        reference: event.reference,
+        txStatusNum: event.txStatusNum,
+        isSuccess: event.isSuccess,
+        isFailed: event.isFailed,
+        isPending: event.isPending,
+        code: event.code,
+        contentType: req.get("content-type"),
+        bodyKeys: Object.keys(payload || {}),
+        payloadPreview: JSON.stringify(payload).slice(0, 1500),
+      })
+      if (event.reference && isCaptivePaymentReference(event.reference)) {
+        buyLog("webhook received", {
+          reference: event.reference,
+          txStatusNum: event.txStatusNum,
+          isSuccess: event.isSuccess,
+          isFailed: event.isFailed,
+          isPending: event.isPending,
+          code: event.code,
+          payload,
+        })
+      }
+
+      if (!verifyMoolreWebhook(payload, req.headers)) {
+        console.error("[moolre-webhook] invalid secret")
+        return res.status(401).json({ error: "Invalid webhook" })
+      }
+
+      if (!event.reference) {
+        console.error("[moolre-webhook] missing externalref", JSON.stringify(payload).slice(0, 500))
+        return res.status(200).json({ received: true, error: "Missing externalref" })
+      }
+
+      if (event.isFailed) {
+        const ussdSession = await sessions.findByPaymentReference(event.reference)
+        if (ussdSession) await sessions.updateSession(String(ussdSession._id), { step: "completed" })
+        return res.status(200).json({ received: true, status: "failed" })
+      }
+
+      if (event.isPending && !event.isSuccess) {
+        return res.status(200).json({ received: true, status: "pending" })
+      }
+
+      if (!event.isSuccess) {
+        return res.status(200).json({ received: true, status: "ignored", code: event.code })
+      }
+
+      const outcome = await processUssdPaymentSuccess(event.reference, "webhook")
+      console.log("[moolre-webhook] outcome", { reference: event.reference, outcome })
+      if (isCaptivePaymentReference(event.reference)) {
+        buyLog("webhook outcome", { reference: event.reference, outcome })
+      }
+      return res.status(200).json({ received: true, ...outcome })
+    } catch (err) {
+      console.error("[moolre-webhook] error", err)
+      buyError("webhook exception", errorForLog(err))
+      return res.status(200).json({
+        received: true,
+        error: err instanceof Error ? err.message : "Webhook processing failed",
+      })
+    }
+  }
+
+  router.post("/payments/webhook", handleMoolrePaymentWebhook)
+
+  return { router, handleMoolrePaymentWebhook }
+}

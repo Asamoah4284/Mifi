@@ -1,0 +1,42 @@
+/** Base URL for API calls (empty = same origin, use Vite `/api` proxy in dev). */
+export function getApiBaseUrl() {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname.toLowerCase()
+    if (host === "tabitacum.cloud" || host === "www.tabitacum.cloud" || host.endsWith(".vercel.app")) {
+      return ""
+    }
+  }
+
+  const v = import.meta.env.VITE_API_BASE_URL
+  return typeof v === "string" ? v : ""
+}
+
+/** Normalize legacy brand labels to Mifi. */
+function normalizeBrandLabel(name) {
+  const trimmed = typeof name === "string" ? name.trim() : ""
+  if (!trimmed) return "Mifi"
+  if (/^(tabitacum|starexpress|starlink|evergreen(\s+wisp)?)(\s+admin)?$/i.test(trimmed)) return "Mifi"
+  return trimmed
+}
+
+/** Default app name (sidebar, breadcrumbs) when settings API is unavailable. */
+export function getDefaultAppName() {
+  const v = import.meta.env.VITE_APP_NAME
+  return normalizeBrandLabel(typeof v === "string" && v.trim() ? v.trim() : "Mifi")
+}
+
+/** Default company name (exports, reports) when settings API is unavailable. */
+export function getDefaultCompanyName() {
+  const v = import.meta.env.VITE_COMPANY_NAME
+  return normalizeBrandLabel(typeof v === "string" && v.trim() ? v.trim() : "Mifi")
+}
+
+export { normalizeBrandLabel }
+
+/** Fallback commission rate (0–1) when settings API is unavailable. Admin can change live rate in Settings. */
+export function getSalesAgentCommissionRate() {
+  const raw = import.meta.env.VITE_SALES_AGENT_COMMISSION_RATE
+  const n = typeof raw === "string" && raw.trim() ? Number.parseFloat(raw.trim()) : 0.167
+  if (!Number.isFinite(n) || n < 0) return 0.167
+  return Math.min(1, n)
+}

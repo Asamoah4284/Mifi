@@ -1,0 +1,236 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: "Montserrat", ui-sans-serif, system-ui, sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-success: var(--success);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --color-canvas: var(--canvas);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    /* App shell: clean modern neutral slate canvas */
+    --canvas: #f8fafc;
+    --background: #ffffff;
+    --foreground: #0f172a;
+    --card: #ffffff;
+    --card-foreground: #0f172a;
+    --popover: #ffffff;
+    --popover-foreground: #0f172a;
+    /* Brand: Mifi — vibrant emerald */
+    --primary: #02a145;
+    --primary-foreground: #ffffff;
+    --secondary: #f1f5f9;
+    --secondary-foreground: #0f172a;
+    --muted: #f1f5f9;
+    --muted-foreground: #64748b;
+    --accent: #f8fafc;
+    --accent-foreground: #0f172a;
+    --destructive: #ef4444;
+    /* Completed / positive status */
+    --success: #02a145;
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --ring: #02a145;
+    --chart-1: #02a145;
+    --chart-2: #0e733d;
+    --chart-3: #2c64b4;
+    --chart-4: #67cf8f;
+    --chart-5: #14532d;
+    /* Base corner radius (buttons, inputs, cards via rounded-lg) */
+    --radius: 0.625rem;
+    --sidebar: #ffffff;
+    --sidebar-foreground: #0f172a;
+    --sidebar-primary: #02a145;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #f8fafc;
+    --sidebar-accent-foreground: #0f172a;
+    --sidebar-border: #e2e8f0;
+    --sidebar-ring: #02a145;
+}
+
+.dark {
+    --canvas: #090d16;
+    --background: #0f172a;
+    --foreground: #f8fafc;
+    --card: #131c31;
+    --card-foreground: #f8fafc;
+    --popover: #131c31;
+    --popover-foreground: #f8fafc;
+    --primary: #2bd368;
+    --primary-foreground: #07150b;
+    --secondary: #1e293b;
+    --secondary-foreground: #f8fafc;
+    --muted: #1e293b;
+    --muted-foreground: #94a3b8;
+    --accent: #1e293b;
+    --accent-foreground: #f8fafc;
+    --destructive: #f87171;
+    --success: #2bd368;
+    --border: #1e293b;
+    --input: #1e293b;
+    --ring: #2bd368;
+    --chart-1: #2bd368;
+    --chart-2: #02a145;
+    --chart-3: #60a5fa;
+    --chart-4: #67cf8f;
+    --chart-5: #14532d;
+    --sidebar: #0f172a;
+    --sidebar-foreground: #f8fafc;
+    --sidebar-primary: #2bd368;
+    --sidebar-primary-foreground: #07150b;
+    --sidebar-accent: #1e293b;
+    --sidebar-accent-foreground: #f8fafc;
+    --sidebar-border: #1e293b;
+    --sidebar-ring: #2bd368;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  html {
+    @apply font-sans;
+    font-optical-sizing: auto;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Reports date range calendar — align react-day-picker with app theme */
+.date-range-calendar.rdp-root {
+  --rdp-accent-color: var(--primary);
+  --rdp-accent-background-color: color-mix(in srgb, var(--primary) 14%, transparent);
+  --rdp-day-height: 2.25rem;
+  --rdp-day-width: 2.25rem;
+  --rdp-day_button-height: 2.125rem;
+  --rdp-day_button-width: 2.125rem;
+  --rdp-day_button-border-radius: var(--radius-md);
+  --rdp-today-color: var(--primary);
+  --rdp-outside-opacity: 0.35;
+  --rdp-months-gap: 1.75rem;
+  color: var(--foreground);
+  font-size: 0.875rem;
+}
+
+.date-range-calendar .rdp-nav-btn {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--foreground);
+  transition: background-color 0.15s ease;
+}
+
+.date-range-calendar .rdp-nav-btn:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+.date-range-calendar .rdp-chevron {
+  fill: var(--foreground);
+  width: 1rem;
+  height: 1rem;
+}
+
+.date-range-calendar .rdp-dropdown_root {
+  position: relative;
+}
+
+.date-range-calendar .rdp-dropdown_root .rdp-chevron {
+  pointer-events: none;
+  position: absolute;
+  top: 50%;
+  right: 0.5rem;
+  transform: translateY(-50%);
+  fill: var(--muted-foreground);
+}
+
+@keyframes stat-pop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.12);
+    color: var(--primary);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes sale-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--success) 28%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes live-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+.animate-stat-pop {
+  animation: stat-pop 0.65s ease-out;
+}
+
+.animate-sale-flash {
+  animation: sale-flash 1.8s ease-out;
+}
+
+.animate-live-ring {
+  animation: live-ring 2s ease-in-out infinite;
+}

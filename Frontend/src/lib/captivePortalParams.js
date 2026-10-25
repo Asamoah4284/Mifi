@@ -1,0 +1,165 @@
+/**
+ * Persist Grandstream captive-portal params across the /buy → payment → success flow.
+ * Query strings can be lost if the user refreshes mid-flow; sessionStorage keeps them.
+ */
+const STORAGE_KEY = "starexpress.captivePortalParams"
+
+/**
+ * @param {URLSearchParams | { get: (key: string) => string | null }} searchParams
+ */
+export function readPortalParamsFromSearch(searchParams) {
+  /** @param {...string} keys */
+  const first = (...keys) => {
+    for (const key of keys) {
+      const value = searchParams.get(key)
+      if (value && value.trim()) return value.trim()
+    }
+    return ""
+  }
+
+  let login_url = first(
+    "login_url",
+    "loginUrl",
+    "loginurl",
+    "authaction",
+    "auth_action",
+    "ga_login_url",
+    "post_url",
+    "submit_url",
+  )
+  if (!login_url) {
+    const target = first("target")
+    if (target && target.toLowerCase().includes("login")) {
+      login_url = target
+    }
+  }
+  if (!login_url) {
+    const gw = first("gw_address", "gateway_address", "gw_ip", "ap_ip", "uamip", "nasip", "nas_ip")
+    if (gw) {
+      const port = first("gw_port", "gateway_port", "uamport") || "8880"
+      login_url = `http://${gw}:${port}/gwn/login`
+    }
+  }
+
+  return {
+    login_url,
+    ap_mac: first("ap_mac", "apMac", "apmac", "ap_macaddress", "called", "called_station_id"),
+    client_mac: first(
+      "client_mac",
+      "clientMac",
+      "clientmac",
+      "mac",
+      "user_mac",
+      "usermac",
+      "client_macaddress",
+      "calling_station_id",
+    ),
+    orig_url: first("orig_url", "origUrl", "origurl", "redir", "redirect", "continue", "target", "url", "userurl"),
+    ssid: first("ssid", "SSID", "essid"),
+    org: first("org", "orgId"),
+  }
+}
+
+/**
+ * @param {{ login_url?: string, ap_mac?: string, client_mac?: string, orig_url?: string, ssid?: string, org?: string }} params
+ */
+export function persistPortalParams(params) {
+  try {
+    if (!params?.login_url && !params?.client_mac && !params?.org) return
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(params))
+  } catch {
+    /* private mode / unavailable */
+  }
+}
+
+/** @returns {{ login_url: string, ap_mac: string, client_mac: string, orig_url: string, ssid: string, org: string }} */
+export function loadPersistedPortalParams() {
+  const empty = { login_url: "", ap_mac: "", client_mac: "", orig_url: "", ssid: "", org: "" }
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return empty
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return empty
+    return {
+      login_url: typeof parsed.login_url === "string" ? parsed.login_url : "",
+      ap_mac: typeof parsed.ap_mac === "string" ? parsed.ap_mac : "",
+      client_mac: typeof parsed.client_mac === "string" ? parsed.client_mac : "",
+      orig_url: typeof parsed.orig_url === "string" ? parsed.orig_url : "",
+      ssid: typeof parsed.ssid === "string" ? parsed.ssid : "",
+      org: typeof parsed.org === "string" ? parsed.org : "",
+    }
+  } catch {
+    return empty
+  }
+}
+
+/**
+ * Prefer URL params; fall back to sessionStorage.
+ * @param {URLSearchParams | { get: (key: string) => string | null }} searchParams
+ */
+export function resolvePortalParams(searchParams) {
+  const fromUrl = readPortalParamsFromSearch(searchParams)
+  const fromStore = loadPersistedPortalParams()
+  const merged = {
+    login_url: fromUrl.login_url || fromStore.login_url,
+    ap_mac: fromUrl.ap_mac || fromStore.ap_mac,
+    client_mac: fromUrl.client_mac || fromStore.client_mac,
+    orig_url: fromUrl.orig_url || fromStore.orig_url,
+    ssid: fromUrl.ssid || fromStore.ssid,
+    org: fromUrl.org || fromStore.org,
+  }
+  if (merged.login_url || merged.client_mac || merged.org) {
+    persistPortalParams(merged)
+  }
+  return merged
+}
+
+/**
+ * @param {{ login_url?: string, client_mac?: string } | null | undefined} params
+ */
+export function hasPortalAuthParams(params) {
+  return Boolean(params?.login_url?.trim() && params?.client_mac?.trim())
+}
+
+/**
+ * Grandstream captive portal: GET login_url with username and password set to the same voucher code.
+ * @param {string} loginUrl
+ * @param {string} code
+ * @param {{ orig_url?: string }} [extra]
+ */
+export function buildHotspotAuthorizeUrl(loginUrl, code, extra = {}) {
+  const base = typeof loginUrl === "string" ? loginUrl.trim() : ""
+  const pin = typeof code === "string" ? code.trim() : ""
+  if (!base || !pin) return ""
+  const joiner = base.includes("?") ? "&" : "?"
+  const orig = typeof extra.orig_url === "string" ? extra.orig_url.trim() : ""
+  let url =
+    `${base}${joiner}username=${encodeURIComponent(pin)}` + `&password=${encodeURIComponent(pin)}`
+  if (orig) url += `&redirect=${encodeURIComponent(orig)}`
+  return url
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {{ login_url: string, ap_mac: string, client_mac: string, orig_url: string, ssid: string, org: string }}
+ */
+export function portalParamsFromApi(raw) {
+  const src = raw && typeof raw === "object" ? /** @type {Record<string, unknown>} */ (raw) : {}
+  const pick = (key) => (typeof src[key] === "string" ? src[key].trim() : "")
+  return {
+    login_url: pick("login_url"),
+    ap_mac: pick("ap_mac"),
+    client_mac: pick("client_mac"),
+    orig_url: pick("orig_url"),
+    ssid: pick("ssid"),
+    org: pick("org") || pick("orgId"),
+  }
+}
+
+export function clearPersistedPortalParams() {
+  try {
+    sessionStorage.removeItem(STORAGE_KEY)
+  } catch {
+    /* ignore */
+  }
+}

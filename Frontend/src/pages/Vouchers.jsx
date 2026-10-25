@@ -1,0 +1,833 @@
+import * as React from "react"
+import { Link, useNavigate } from "react-router-dom"
+import { useQueryClient } from "@tanstack/react-query"
+import { FileUp, Trash2, Upload } from "lucide-react"
+import { useAuth } from "@/context/AuthContext.jsx"
+import { useCatalog } from "@/hooks/useCatalog.js"
+import { PageHeader } from "@/components/shared/PageHeader.jsx"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Separator } from "@/components/ui/separator"
+import { Switch } from "@/components/ui/switch"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { importVouchersBatch, setLocationPromo } from "@/lib/api.js"
+import { parseCsv, ensureVoucherHeaderRow } from "@/lib/parseCsv.js"
+import { isHiddenVoucherThroughputColumnKey } from "@/lib/voucherColumnDisplay.js"
+import { ROLE_ADMIN } from "@/lib/roles.js"
+import { cn } from "@/lib/utils"
+
+/**
+ * @typedef {object} StagedUpload
+ * @property {string} id
+ * @property {string} name
+ * @property {number} size
+ * @property {string} type
+ * @property {string} addedAt
+ * @property {"csv" | "other"} kind
+ * @property {string[][] | null} matrix
+ * @property {string | null} parseError
+ * @property {"idle" | "loading" | "success" | "error"} [importState]
+ * @property {string} [importMessage]
+ */
+
+const ACCEPT = ".pdf,.csv,.png,.jpg,.jpeg,.webp,.xlsx,.xls"
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** @param {File} file */
+function isCsvFile(file) {
+  const lower = file.name.toLowerCase()
+  if (lower.endsWith(".csv")) return true
+  const t = (file.type || "").toLowerCase()
+  return t === "text/csv" || t === "application/csv"
+}
+
+/**
+ * @param {File} file
+ * @returns {Promise<StagedUpload>}
+ */
+async function stagedUploadFromFile(file) {
+  const base = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: file.name,
+    size: file.size,
+    type: file.type || "—",
+    addedAt: new Date().toISOString(),
+    kind: /** @type {"csv" | "other"} */ (isCsvFile(file) ? "csv" : "other"),
+    matrix: null,
+    parseError: null,
+    importState: "idle",
+    importMessage: "",
+  }
+
+  if (base.kind !== "csv") return base
+
+  try {
+    const text = await file.text()
+    const matrix = ensureVoucherHeaderRow(parseCsv(text))
+    return { ...base, matrix }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not read this file"
+    return { ...base, parseError: message }
+  }
+}
+
+function CsvPreviewTable({ matrix }) {
+  if (!matrix.length) {
+    return <p className="text-muted-foreground px-3 py-4 text-center text-sm">This CSV has no rows.</p>
+  }
+
+  const rawHeader = matrix[0]
+  const omit = new Set()
+  for (let i = 0; i < rawHeader.length; i++) {
+    if (isHiddenVoucherThroughputColumnKey(String(rawHeader[i] ?? ""))) omit.add(i)
+  }
+  const header = rawHeader.filter((_, i) => !omit.has(i))
+
+  /** @param {string[]} line */
+  function visibleCells(line) {
+    const out = []
+    for (let i = 0; i < rawHeader.length; i++) {
+      if (omit.has(i)) continue
+      out.push(i < line.length ? line[i] : "")
+    }
+    return out
+  }
+
+  const body = matrix.slice(1).map((line) => visibleCells(line))
+  const colSpan = Math.max(header.length, 1)
+
+  return (
+    <div className="max-h-[min(70vh,520px)] overflow-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {header.map((cell, i) => (
+              <TableHead key={i} className="whitespace-nowrap font-semibold">
+                {cell}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {body.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={colSpan} className="text-muted-foreground text-center text-sm">
+                No data rows after the header row.
+              </TableCell>
+            </TableRow>
+          ) : (
+            body.map((line, ri) => (
+              <TableRow key={ri}>
+                {line.map((cell, ci) => (
+                  <TableCell key={ci} className="max-w-[280px] truncate whitespace-nowrap">
+                    <span className="inline-block max-w-[min(280px,40vw)] truncate align-top" title={cell}>
+                      {cell}
+                    </span>
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  )
+}
+
+export default function Vouchers() {
+  const inputId = React.useId()
+  const inputRef = React.useRef(null)
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const catalog = useCatalog()
+  const { token, user, authReady } = useAuth()
+  /** @type {React.MutableRefObject<boolean>} */
+  const cancelledRef = React.useRef(false)
+  const [rows, setRows] = React.useState([])
+  const [dragOver, setDragOver] = React.useState(false)
+  const [parsing, setParsing] = React.useState(false)
+  const [selectedLocationId, setSelectedLocationId] = React.useState("")
+  const [selectedPackageId, setSelectedPackageId] = React.useState("")
+  const [singleVoucherId, setSingleVoucherId] = React.useState("")
+  const [singleSaving, setSingleSaving] = React.useState(false)
+  const [singleFeedback, setSingleFeedback] = React.useState(/** @type {{ kind: "success" | "error"; text: string } | null} */ (null))
+  const [promoCode, setPromoCode] = React.useState("")
+  const [promoMessage, setPromoMessage] = React.useState("")
+  const [promoPercent, setPromoPercent] = React.useState("0")
+  const [promoActive, setPromoActive] = React.useState(false)
+  const [promoSaving, setPromoSaving] = React.useState(false)
+  const [promoFeedback, setPromoFeedback] = React.useState(/** @type {{ kind: "success" | "error"; text: string } | null} */ (null))
+  const isAdmin = user?.role === ROLE_ADMIN
+
+  const locations = React.useMemo(() => {
+    const list = catalog.data?.locations ?? []
+    return [...list].sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+  }, [catalog.data?.locations])
+
+  const activePackages = React.useMemo(() => {
+    const list = catalog.data?.packages ?? []
+    return list
+      .filter((p) => p.status === "Active")
+      .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+  }, [catalog.data?.packages])
+
+  const locationReady = Boolean(selectedLocationId.trim())
+  const packageReady = Boolean(selectedPackageId.trim())
+  const assignReady = locationReady && packageReady
+
+  const selectedLocation = React.useMemo(
+    () => locations.find((l) => l.id === selectedLocationId) ?? null,
+    [locations, selectedLocationId],
+  )
+
+  React.useEffect(() => {
+    cancelledRef.current = false
+    return () => {
+      cancelledRef.current = true
+    }
+  }, [])
+
+  // Load the selected location's saved promo into the editor only when the
+  // location actually changes — not on every catalog refetch (which would wipe
+  // the success message and any in-progress edits after a save).
+  const syncedPromoLocationRef = React.useRef(/** @type {string | null} */ (null))
+  React.useEffect(() => {
+    if (syncedPromoLocationRef.current === selectedLocationId) return
+    syncedPromoLocationRef.current = selectedLocationId
+    const promo = selectedLocation?.promo ?? null
+    setPromoCode(promo?.code ?? "")
+    setPromoMessage(promo?.message ?? "")
+    setPromoPercent(promo?.percentOff != null ? String(promo.percentOff) : "0")
+    setPromoActive(promo?.active === true)
+    setPromoFeedback(null)
+  }, [selectedLocationId, selectedLocation])
+
+  const savePromo = React.useCallback(async () => {
+    if (!token || !isAdmin) return
+    const locId = selectedLocationId.trim()
+    if (!locId) {
+      setPromoFeedback({ kind: "error", text: "Select a location first." })
+      return
+    }
+    const code = promoCode.trim()
+    const pctNum = Math.round(Number(promoPercent))
+    if (!Number.isFinite(pctNum) || pctNum < 0 || pctNum > 100) {
+      setPromoFeedback({ kind: "error", text: "Percent off must be a whole number between 0 and 100." })
+      return
+    }
+    if (promoActive && !code) {
+      setPromoFeedback({ kind: "error", text: "Enter a promo code before turning the promo on." })
+      return
+    }
+    setPromoSaving(true)
+    setPromoFeedback(null)
+    try {
+      const out = await setLocationPromo(token, locId, {
+        code,
+        message: promoMessage.trim(),
+        active: promoActive,
+        percentOff: pctNum,
+      })
+      if (!out.ok) {
+        setPromoFeedback({ kind: "error", text: out.error })
+        return
+      }
+      await queryClient.invalidateQueries({ queryKey: ["catalog", token] })
+      await queryClient.invalidateQueries({ queryKey: ["auditLogs", token] })
+      const cleared = !code && !promoMessage.trim()
+      const discountText = pctNum > 0 ? ` Buyers who enter ${code} get ${pctNum}% off.` : ""
+      setPromoFeedback({
+        kind: "success",
+        text: cleared
+          ? "Promo cleared for this location."
+          : promoActive
+            ? `Promo saved and is now visible to buyers (if promos are enabled in Settings).${discountText}`
+            : `Promo saved. It stays hidden until you turn it on.${discountText}`,
+      })
+    } catch (e) {
+      setPromoFeedback({ kind: "error", text: e instanceof Error ? e.message : "Request failed." })
+    } finally {
+      setPromoSaving(false)
+    }
+  }, [token, isAdmin, selectedLocationId, promoCode, promoMessage, promoPercent, promoActive, queryClient])
+
+  const addFiles = React.useCallback(async (fileList) => {
+    const list = fileList ? Array.from(fileList) : []
+    if (!list.length) return
+    setParsing(true)
+    try {
+      const newRows = await Promise.all(list.map((f) => stagedUploadFromFile(f)))
+      if (!cancelledRef.current) {
+        setRows((prev) => [...newRows, ...prev])
+      }
+    } finally {
+      if (!cancelledRef.current) setParsing(false)
+    }
+  }, [])
+
+  const onInputChange = (e) => {
+    void addFiles(e.target.files)
+    e.target.value = ""
+  }
+
+  const onDrop = (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    void addFiles(e.dataTransfer.files)
+  }
+
+  const removeRow = (id) => {
+    setRows((prev) => prev.filter((r) => r.id !== id))
+  }
+
+  const importCsv = React.useCallback(
+    async (/** @type {StagedUpload} */ upload) => {
+      if (!token || upload.kind !== "csv" || !upload.matrix?.length || upload.parseError) return
+      const importRows = ensureVoucherHeaderRow(upload.matrix)
+      if (importRows.length < 2) return
+      const locId = selectedLocationId.trim()
+      const pkgId = selectedPackageId.trim()
+      if (!locId || !pkgId) return
+
+      setRows((prev) =>
+        prev.map((x) => (x.id === upload.id ? { ...x, importState: "loading", importMessage: "" } : x)),
+      )
+
+      const out = await importVouchersBatch(token, {
+        fileName: upload.name,
+        rows: importRows,
+        locationId: locId,
+        packageId: pkgId,
+      })
+
+      setRows((prev) =>
+        prev.map((x) => {
+          if (x.id !== upload.id) return x
+          if (!out.ok) return { ...x, importState: "error", importMessage: out.error }
+          return {
+            ...x,
+            importState: "success",
+            importMessage:
+              out.inserted > 0
+                ? `Saved ${out.inserted} new voucher(s) for this package. Skipped ${out.skippedAlreadyInDb} already on this package, ${out.skippedDuplicateInFile} duplicate in file, ${out.skippedNoId} row(s) without a code (batch ${out.batchId}).`
+                : `No new vouchers saved. Skipped ${out.skippedAlreadyInDb} already on this package, ${out.skippedDuplicateInFile} duplicate in file, ${out.skippedNoId} row(s) without a Username / Voucher ID. Check the CSV has a username or code column.`,
+          }
+        }),
+      )
+
+      if (out.ok) {
+        await queryClient.invalidateQueries({ queryKey: ["catalog"] })
+        await queryClient.invalidateQueries({ queryKey: ["auditLogs", token] })
+        await queryClient.invalidateQueries({ queryKey: ["vouchers"] })
+        await queryClient.invalidateQueries({ queryKey: ["vouchers-summary"] })
+        await queryClient.invalidateQueries({ queryKey: ["voucher-stats"] })
+        await queryClient.invalidateQueries({ queryKey: ["package-voucher-inventory"] })
+        if (out.inserted > 0) {
+          navigate(`/vouchers/uploaded?packageId=${encodeURIComponent(pkgId)}`)
+        }
+      }
+    },
+    [token, queryClient, navigate, selectedLocationId, selectedPackageId],
+  )
+
+  const saveSingleVoucher = React.useCallback(async () => {
+    if (!token || !isAdmin) return
+    const locId = selectedLocationId.trim()
+    const pkgId = selectedPackageId.trim()
+    if (!locId) {
+      setSingleFeedback({ kind: "error", text: "Select a location first." })
+      return
+    }
+    if (!pkgId) {
+      setSingleFeedback({ kind: "error", text: "Select a package first." })
+      return
+    }
+    const id = singleVoucherId.trim()
+    if (!id) {
+      setSingleFeedback({ kind: "error", text: "Enter a voucher ID." })
+      return
+    }
+    if (id.length > 128) {
+      setSingleFeedback({ kind: "error", text: "Voucher ID must be at most 128 characters." })
+      return
+    }
+    setSingleSaving(true)
+    setSingleFeedback(null)
+    try {
+      const out = await importVouchersBatch(token, {
+        fileName: `single-voucher-${Date.now()}.csv`,
+        rows: [["Voucher ID"], [id]],
+        locationId: locId,
+        packageId: pkgId,
+      })
+      if (!out.ok) {
+        setSingleFeedback({ kind: "error", text: out.error })
+        return
+      }
+      setSingleVoucherId("")
+      setSingleFeedback({
+        kind: "success",
+        text: `Saved ${out.inserted} new voucher(s) for this package. Skipped ${out.skippedAlreadyInDb} already on this package, ${out.skippedDuplicateInFile} duplicate in file, ${out.skippedNoId} without id (batch ${out.batchId}).`,
+      })
+      await queryClient.invalidateQueries({ queryKey: ["catalog"] })
+      await queryClient.invalidateQueries({ queryKey: ["auditLogs", token] })
+      await queryClient.invalidateQueries({ queryKey: ["vouchers"] })
+      await queryClient.invalidateQueries({ queryKey: ["vouchers-summary"] })
+      await queryClient.invalidateQueries({ queryKey: ["voucher-stats"] })
+      await queryClient.invalidateQueries({ queryKey: ["package-voucher-inventory"] })
+    } catch (e) {
+      setSingleFeedback({
+        kind: "error",
+        text: e instanceof Error ? e.message : "Request failed.",
+      })
+    } finally {
+      setSingleSaving(false)
+    }
+  }, [token, isAdmin, selectedLocationId, selectedPackageId, singleVoucherId, queryClient])
+
+  return (
+    <div className="space-y-8">
+      <PageHeader
+        title="Upload vouchers"
+        description="Import daloRADIUS codes (CSV or a single ID) for a location and package. Use a CSV with a Username or Voucher ID column (comma or semicolon). Agent, USSD, and hotspot /buy all sell from this stock."
+      />
+
+      <Card className="border-border bg-card shadow-none ring-1 ring-border">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base font-semibold tracking-tight">Assign & import</CardTitle>
+          <CardDescription>
+            Every import is tied to a <strong>location</strong> and an <strong>active package</strong>. Use{" "}
+            <strong>Single voucher</strong> for one ID or <strong>Bulk (CSV)</strong> for many rows. Open{" "}
+            <strong>Vouchers</strong> in the sidebar to review saved rows.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6 pt-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-muted-foreground text-xs">
+              {catalog.isLoading ? (
+                <span>Loading catalog…</span>
+              ) : (
+                <span>Pick a location and package before importing.</span>
+              )}
+            </p>
+            <Button type="button" variant="outline" size="sm" className="h-8 text-xs" asChild>
+              <Link to="/vouchers/uploaded">View uploaded vouchers</Link>
+            </Button>
+          </div>
+
+          {catalog.isError ? (
+            <p className="text-destructive text-sm" role="alert">
+              {catalog.error instanceof Error ? catalog.error.message : "Could not load locations."}
+            </p>
+          ) : null}
+
+          <div className="space-y-2">
+            <Label htmlFor="voucher-assign-location" className="text-muted-foreground text-xs font-medium">
+              Location
+            </Label>
+            <Select
+              value={selectedLocationId || undefined}
+              onValueChange={(v) => setSelectedLocationId(v)}
+              disabled={!authReady || !token || !isAdmin || catalog.isLoading || locations.length === 0}
+            >
+              <SelectTrigger id="voucher-assign-location" className="h-9 w-full max-w-md">
+                <SelectValue placeholder={locations.length === 0 ? "No locations yet" : "Select location…"} />
+              </SelectTrigger>
+              <SelectContent>
+                {locations.map((loc) => (
+                  <SelectItem key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {!catalog.isLoading && locations.length === 0 && isAdmin ? (
+              <p className="text-muted-foreground text-xs">
+                Create a location under <strong>Locations</strong> before importing vouchers.
+              </p>
+            ) : null}
+            {authReady && !isAdmin ? (
+              <p className="text-muted-foreground text-xs">Only administrators can import vouchers.</p>
+            ) : null}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="voucher-assign-package" className="text-muted-foreground text-xs font-medium">
+              Package
+            </Label>
+            <Select
+              value={selectedPackageId || undefined}
+              onValueChange={(v) => setSelectedPackageId(v)}
+              disabled={!authReady || !token || !isAdmin || catalog.isLoading || activePackages.length === 0}
+            >
+              <SelectTrigger id="voucher-assign-package" className="h-9 w-full max-w-md">
+                <SelectValue placeholder={activePackages.length === 0 ? "No active packages" : "Select package…"} />
+              </SelectTrigger>
+              <SelectContent>
+                {activePackages.map((pkg) => (
+                  <SelectItem key={pkg.id} value={pkg.id}>
+                    {pkg.name}
+                    {pkg.dataLimit ? ` · ${pkg.dataLimit}` : ""}
+                    {typeof pkg.priceGHS === "number" ? ` · GH₵ ${pkg.priceGHS}` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {!catalog.isLoading && activePackages.length === 0 && isAdmin ? (
+              <p className="text-muted-foreground text-xs">
+                Add an <strong>Active</strong> package under <strong>Packages</strong> before importing vouchers.
+              </p>
+            ) : null}
+          </div>
+
+          <Tabs defaultValue="bulk" className="w-full min-w-0">
+            <TabsList className="grid h-9 w-full max-w-md grid-cols-2">
+              <TabsTrigger value="single">Single voucher</TabsTrigger>
+              <TabsTrigger value="bulk">Bulk (CSV)</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="single" className="mt-4 space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="single-voucher-id">Voucher ID</Label>
+                <Input
+                  id="single-voucher-id"
+                  placeholder="e.g. 18645924131"
+                  value={singleVoucherId}
+                  onChange={(e) => setSingleVoucherId(e.target.value)}
+                  maxLength={128}
+                  autoComplete="off"
+                  className="max-w-md"
+                  disabled={!authReady || !token || !isAdmin}
+                />
+                <p className="text-muted-foreground text-xs">Saves one voucher with only the ID column (same rules as CSV import).</p>
+              </div>
+              {singleFeedback ? (
+                <p
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-sm",
+                    singleFeedback.kind === "error"
+                      ? "text-destructive border-destructive/30 bg-destructive/5"
+                      : "text-muted-foreground border-border bg-muted/30",
+                  )}
+                  role={singleFeedback.kind === "error" ? "alert" : "status"}
+                >
+                  {singleFeedback.text}
+                </p>
+              ) : null}
+              <Button
+                type="button"
+                disabled={
+                  !authReady ||
+                  !token ||
+                  !isAdmin ||
+                  !assignReady ||
+                  singleSaving ||
+                  locations.length === 0 ||
+                  activePackages.length === 0 ||
+                  !singleVoucherId.trim()
+                }
+                onClick={() => void saveSingleVoucher()}
+              >
+                {singleSaving ? "Saving…" : "Save to server"}
+              </Button>
+            </TabsContent>
+
+            <TabsContent value="bulk" className="mt-4 space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-muted-foreground text-xs">
+                  {parsing ? <span>Reading files…</span> : <span>Staged files appear below.</span>}
+                </p>
+              </div>
+
+              {rows.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  No files staged yet. Use <strong>Choose files</strong> or the drop zone below.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {rows.map((r) => (
+                    <div key={r.id} className="border-border overflow-hidden rounded-lg border">
+                      <div className="bg-muted/30 flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{r.name}</p>
+                          <p className="text-muted-foreground text-xs tabular-nums">
+                            {formatBytes(r.size)}
+                            <span className="mx-1.5">·</span>
+                            {r.addedAt.slice(0, 19).replace("T", " ")}
+                            {r.kind === "other" ? (
+                              <>
+                                <span className="mx-1.5">·</span>
+                                {r.type}
+                              </>
+                            ) : null}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {r.kind === "csv" && !r.parseError && r.matrix && r.matrix.length >= 2 ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="h-8"
+                              disabled={
+                                !authReady ||
+                                !token ||
+                                !isAdmin ||
+                                r.importState === "loading" ||
+                                !assignReady ||
+                                locations.length === 0 ||
+                                activePackages.length === 0
+                              }
+                              onClick={() => void importCsv(r)}
+                              title={
+                                !assignReady ? "Select a location and package first" : undefined
+                              }
+                            >
+                              {r.importState === "loading" ? "Importing…" : "Import to server"}
+                            </Button>
+                          ) : null}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            aria-label={`Remove ${r.name}`}
+                            onClick={() => removeRow(r.id)}
+                          >
+                            <Trash2 className="size-4 stroke-[1.5]" />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {authReady && !isAdmin ? (
+                        <p className="text-muted-foreground border-b border-border px-3 py-2 text-xs">
+                          Only administrators can import voucher CSV rows to the database.
+                        </p>
+                      ) : null}
+
+                      {r.importState === "error" || r.importState === "success" ? (
+                        <p
+                          className={cn(
+                            "border-b border-border px-3 py-2 text-xs",
+                            r.importState === "error" ? "text-destructive" : "text-muted-foreground",
+                          )}
+                        >
+                          {r.importMessage}
+                        </p>
+                      ) : null}
+
+                      {r.kind === "csv" && r.parseError ? (
+                        <p className="text-destructive px-3 py-3 text-sm">{r.parseError}</p>
+                      ) : null}
+
+                      {r.kind === "csv" && !r.parseError && r.matrix ? <CsvPreviewTable matrix={r.matrix} /> : null}
+
+                      {r.kind === "other" ? (
+                        <p className="text-muted-foreground px-3 py-3 text-sm">
+                          Table preview is available for <span className="text-foreground font-medium">.csv</span> files. Other formats are not
+                          sent to the server yet.
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Separator />
+
+          <div
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault()
+                inputRef.current?.click()
+              }
+            }}
+            onDragEnter={(e) => {
+              e.preventDefault()
+              setDragOver(true)
+            }}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragOver(true)
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onDrop}
+            onClick={() => inputRef.current?.click()}
+            className={cn(
+              "border-border bg-muted/20 hover:border-primary/40 hover:bg-muted/35 flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-12 transition-colors",
+              dragOver && "border-primary bg-primary/5",
+            )}
+          >
+            <div className="bg-primary/10 text-primary mb-3 flex size-12 items-center justify-center rounded-full">
+              <Upload className="size-6 stroke-[1.5]" aria-hidden />
+            </div>
+            <p className="text-foreground text-sm font-medium">Drop files to upload</p>
+            <p className="text-muted-foreground mt-1 text-center text-xs">or click to browse · {ACCEPT.replaceAll(",", ", ")}</p>
+            <input
+              ref={inputRef}
+              id={inputId}
+              type="file"
+              multiple
+              accept={ACCEPT}
+              className="sr-only"
+              onChange={onInputChange}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" className="gap-2 border-border shadow-none" onClick={() => inputRef.current?.click()}>
+              <FileUp className="size-4 stroke-[1.5]" aria-hidden />
+              Choose files
+            </Button>
+            <Label htmlFor={inputId} className="sr-only">
+              Voucher files
+            </Label>
+          </div>
+            </TabsContent>
+          </Tabs>
+        </CardContent>
+      </Card>
+
+      {isAdmin ? (
+        <Card className="border-border bg-card shadow-none ring-1 ring-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base font-semibold tracking-tight">Promo code (per location)</CardTitle>
+            <CardDescription>
+              Show a promo code and short message to buyers on the public buy page for the selected{" "}
+              <strong>location</strong>. Turn it on here, and make sure <strong>Show promos</strong> is enabled in{" "}
+              <strong>Settings</strong>.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4 pt-2">
+            {!locationReady ? (
+              <p className="text-muted-foreground text-sm">Select a location above to set its promo.</p>
+            ) : (
+              <>
+                <p className="text-muted-foreground text-xs">
+                  Editing promo for <span className="text-foreground font-medium">{selectedLocation?.name}</span>.
+                </p>
+                <div className="max-w-md space-y-2">
+                  <Label htmlFor="promo-code">Promo code</Label>
+                  <Input
+                    id="promo-code"
+                    value={promoCode}
+                    onChange={(e) => setPromoCode(e.target.value)}
+                    placeholder="e.g. FREEHOUR"
+                    maxLength={64}
+                    autoComplete="off"
+                    disabled={promoSaving}
+                  />
+                </div>
+                <div className="max-w-md space-y-2">
+                  <Label htmlFor="promo-message">Message (optional)</Label>
+                  <textarea
+                    id="promo-message"
+                    value={promoMessage}
+                    onChange={(e) => setPromoMessage(e.target.value)}
+                    maxLength={280}
+                    rows={3}
+                    placeholder="e.g. Show this code at the front desk for a free hour of WiFi."
+                    disabled={promoSaving}
+                    className="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 flex min-h-20 w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                  <p className="text-muted-foreground text-xs tabular-nums">{promoMessage.length}/280</p>
+                </div>
+                <div className="max-w-md space-y-2">
+                  <Label htmlFor="promo-percent">Percent off (%)</Label>
+                  <Input
+                    id="promo-percent"
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={promoPercent}
+                    onChange={(e) => setPromoPercent(e.target.value)}
+                    disabled={promoSaving}
+                    className="max-w-[8rem]"
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    Buyers who enter this code at checkout pay this much less. Leave at{" "}
+                    <strong>0</strong> for a display-only promo (code + message, no discount). Online
+                    payment needs a non-zero total, so 100% off can't be purchased through MoMo.
+                  </p>
+                </div>
+                <div className="border-border flex max-w-md items-center justify-between gap-4 rounded-lg border px-4 py-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">Show this promo to buyers</p>
+                    <p className="text-muted-foreground text-xs">Off keeps it saved but hidden.</p>
+                  </div>
+                  <Switch
+                    checked={promoActive}
+                    onCheckedChange={setPromoActive}
+                    disabled={promoSaving}
+                    aria-label="Toggle promo visibility for this location"
+                  />
+                </div>
+                {promoFeedback ? (
+                  <p
+                    className={cn(
+                      "max-w-md rounded-md border px-3 py-2 text-sm",
+                      promoFeedback.kind === "error"
+                        ? "text-destructive border-destructive/30 bg-destructive/5"
+                        : "text-muted-foreground border-border bg-muted/30",
+                    )}
+                    role={promoFeedback.kind === "error" ? "alert" : "status"}
+                  >
+                    {promoFeedback.text}
+                  </p>
+                ) : null}
+                <div className="flex items-center gap-2">
+                  <Button type="button" onClick={() => void savePromo()} disabled={promoSaving || !locationReady}>
+                    {promoSaving ? "Saving…" : "Save promo"}
+                  </Button>
+                  {promoCode || promoMessage ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="text-muted-foreground"
+                      disabled={promoSaving}
+                      onClick={() => {
+                        setPromoCode("")
+                        setPromoMessage("")
+                        setPromoActive(false)
+                      }}
+                    >
+                      Clear fields
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  Tip: clear both fields and Save to remove the promo entirely.
+                </p>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      ) : null}
+    </div>
+  )
+}

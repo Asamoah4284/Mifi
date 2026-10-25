@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://api.tabitacum.cloud/api/:path*"
+    },
+    {
+      "source": "/ussd/:path*",
+      "destination": "https://api.tabitacum.cloud/ussd/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
