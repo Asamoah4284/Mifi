@@ -279,6 +279,7 @@ async function main() {
     jwtExpiresIn: JWT_EXPIRES_IN,
     organizations: getOrganizationsCollection(),
     appSettings: getAppSettingsCollection(),
+    auditLogs: getAuditLogsCollection(),
   })
   app.use("/api/auth", authRouter)
 

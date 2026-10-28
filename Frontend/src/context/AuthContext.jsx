@@ -11,7 +11,7 @@ const STORAGE_KEY = "Starexpress-auth-session"
 
 /** @typedef {{ ok: true, user: AuthUser } | { ok: false }} LoginResult */
 
-/** @type {React.Context<{ user: AuthUser | null, token: string | null, isAuthenticated: boolean, authReady: boolean, login: (email: string, password: string) => Promise<LoginResult>, signup: (name: string, email: string, phone: string, password: string, otp: string, organizationName?: string) => Promise<SignupResult>, logout: () => void } | null>} */
+/** @type {React.Context<{ user: AuthUser | null, token: string | null, isAuthenticated: boolean, authReady: boolean, login: (email: string, password: string) => Promise<LoginResult>, signup: (name: string, email: string, phone: string, password: string, otp: string, organizationName?: string) => Promise<SignupResult>, logout: () => void, updateSession: (user: AuthUser, token?: string | null) => void } | null>} */
 const AuthContext = React.createContext(null)
 
 /** @param {unknown} u */
@@ -125,6 +125,17 @@ export function AuthProvider({ children }) {
     setToken(null)
   }, [])
 
+  const updateSession = React.useCallback((nextUser, nextToken) => {
+    if (nextUser) {
+      setUser(nextUser)
+      const t = nextToken ?? token
+      if (t) {
+        setToken(t)
+        persistSession({ user: nextUser, token: t })
+      }
+    }
+  }, [token])
+
   const value = React.useMemo(
     () => ({
       user,
@@ -134,8 +145,9 @@ export function AuthProvider({ children }) {
       login,
       signup,
       logout,
+      updateSession,
     }),
-    [user, token, authReady, login, signup, logout],
+    [user, token, authReady, login, signup, logout, updateSession],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

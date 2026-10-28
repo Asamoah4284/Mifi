@@ -20,23 +20,23 @@ export class UserStore {
    * @param {string} [orgId]
    */
   async seedAdmin(email, passwordPlain, name, saltRounds, orgId = DEFAULT_ORG_ID) {
+    const existing = await this.users.findOne({ _id: "admin" })
+    if (existing) {
+      return
+    }
     const key = normalizeEmail(email)
     const passwordHash = bcrypt.hashSync(passwordPlain, saltRounds)
-    await this.users.replaceOne(
-      { _id: "admin" },
-      {
-        _id: "admin",
-        email: email.trim(),
-        email_normalized: key,
-        name,
-        role: "Admin",
-        password_hash: passwordHash,
-        active: true,
-        orgId: orgId || DEFAULT_ORG_ID,
-        created_at: new Date(),
-      },
-      { upsert: true },
-    )
+    await this.users.insertOne({
+      _id: "admin",
+      email: email.trim(),
+      email_normalized: key,
+      name,
+      role: "Admin",
+      password_hash: passwordHash,
+      active: true,
+      orgId: orgId || DEFAULT_ORG_ID,
+      created_at: new Date(),
+    })
   }
 
   /**
@@ -152,6 +152,68 @@ export class UserStore {
     }
   }
 
+  /** @param {string} id */
+  async getUserById(id) {
+    const doc = await this.users.findOne({ _id: id })
+    if (!doc) return null
+    return {
+      id: String(doc._id),
+      name: doc.name,
+      email: doc.email,
+      phone: typeof doc.phone === "string" ? doc.phone : undefined,
+      role: doc.role,
+      passwordHash: doc.password_hash,
+      orgId: typeof doc.orgId === "string" ? doc.orgId : undefined,
+      active: doc.active !== false,
+    }
+  }
+
+  /**
+   * @param {string} id
+   * @param {{ email?: string, password?: string, name?: string, saltRounds?: number }} patch
+   */
+  async updateCredentials(id, patch) {
+    const doc = await this.users.findOne({ _id: id })
+    if (!doc) return "not_found"
+
+    /** @type {Record<string, unknown>} */
+    const $set = {}
+
+    if (typeof patch.name === "string" && patch.name.trim().length >= 2) {
+      $set.name = patch.name.trim()
+    }
+
+    if (typeof patch.email === "string" && patch.email.trim()) {
+      const displayEmail = patch.email.trim()
+      if (!displayEmail.includes("@")) throw new Error("A valid email is required.")
+      const key = normalizeEmail(displayEmail)
+      const currentKey =
+        typeof doc.email_normalized === "string"
+          ? doc.email_normalized
+          : normalizeEmail(String(doc.email || ""))
+      if (key !== currentKey) {
+        const clash = await this.users.findOne({ email_normalized: key, _id: { $ne: id } })
+        if (clash) return "exists"
+        $set.email = displayEmail
+        $set.email_normalized = key
+      }
+    }
+
+    if (typeof patch.password === "string" && patch.password.length > 0) {
+      if (patch.password.length < 6) throw new Error("Password must be at least 6 characters.")
+      const saltRounds = Number(patch.saltRounds) || Number(process.env.BCRYPT_SALT_ROUNDS) || 10
+      $set.password_hash = bcrypt.hashSync(patch.password, saltRounds)
+    }
+
+    if (Object.keys($set).length === 0) {
+      return this.getUserById(id)
+    }
+
+    $set.updated_at = new Date()
+    await this.users.updateOne({ _id: id }, { $set })
+    return this.getUserById(id)
+  }
+
   /**
    * @param {string} [orgId]
    * @returns {Promise<Array<{ id: string, name: string, email: string, role: string, active: boolean, orgId?: string }>>}
@@ -253,7 +315,10 @@ export class UserStore {
    * @returns {Promise<{ id: string, name: string, email: string, role: string, active: boolean, orgId?: string } | "not_found" | "exists" | "last_admin">}
    */
   async updateUser(id, orgId, patch) {
-    const existing = await this.users.findOne({ _id: id, orgId })
+    let existing = await this.users.findOne(orgId ? { _id: id, orgId } : { _id: id })
+    if (!existing) {
+      existing = await this.users.findOne({ _id: id })
+    }
     if (!existing) return "not_found"
 
     /** @type {Record<string, unknown>} */
@@ -301,7 +366,7 @@ export class UserStore {
     }
 
     $set.updated_at = new Date()
-    const result = await this.users.updateOne({ _id: id, orgId }, { $set })
+    const result = await this.users.updateOne({ _id: id }, { $set })
     if (result.matchedCount === 0) return "not_found"
     return this.getPublicUserById(id)
   }

@@ -435,6 +435,26 @@ export async function updateTeamUser(token, id, body) {
 
 /**
  * @param {string} token
+ * @param {{ email?: string, password?: string, currentPassword?: string, name?: string }} body
+ */
+export async function updateAdminCredentials(token, body) {
+  const { res, data } = await parseJsonResponse("/api/auth/credentials", {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const msg = typeof data === "object" && data && "error" in data ? String(data.error) : res.statusText
+    return { ok: false, error: msg }
+  }
+  if (typeof data !== "object" || data === null || !data.ok) {
+    return { ok: false, error: "Unexpected response from server." }
+  }
+  return { ok: true, user: data.user, token: data.token, message: data.message }
+}
+
+/**
+ * @param {string} token
  * @param {string} id
  * @param {boolean} active
  */

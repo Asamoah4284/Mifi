@@ -7,9 +7,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { PasswordField } from "@/components/auth/PasswordField.jsx"
 import { useAuth } from "@/context/AuthContext.jsx"
 import { APP_SETTINGS_QUERY_KEY, useAppSettings } from "@/hooks/useAppSettings.js"
-import { fetchFinanceLocations, updateAppSettings, updateAppSettingsCommission, updateFinanceLocation } from "@/lib/api.js"
+import {
+  fetchFinanceLocations,
+  updateAdminCredentials,
+  updateAppSettings,
+  updateAppSettingsCommission,
+  updateFinanceLocation,
+} from "@/lib/api.js"
 import { getDefaultAppName, getDefaultCompanyName, getSalesAgentCommissionRate } from "@/lib/env.js"
 import { readImageFileAsDataUrl } from "@/lib/readImageFile.js"
 
@@ -41,9 +48,24 @@ function settingsFromResponse(r) {
 
 export default function Settings() {
   const { theme, setTheme } = useTheme()
-  const { token, user } = useAuth()
+  const { token, user, updateSession } = useAuth()
   const queryClient = useQueryClient()
   const settingsQuery = useAppSettings()
+
+  const [adminEmail, setAdminEmail] = React.useState(user?.email || "")
+  const [currentPassword, setCurrentPassword] = React.useState("")
+  const [newPassword, setNewPassword] = React.useState("")
+  const [confirmPassword, setConfirmPassword] = React.useState("")
+  const [adminCredMessage, setAdminCredMessage] = React.useState(
+    /** @type {{ type: "ok" | "err", text: string } | null} */ (null),
+  )
+  const [isSavingCreds, setIsSavingCreds] = React.useState(false)
+
+  React.useEffect(() => {
+    if (user?.email) {
+      setAdminEmail(user.email)
+    }
+  }, [user?.email])
 
   const [appName, setAppName] = React.useState(getDefaultAppName())
   const [companyName, setCompanyName] = React.useState(getDefaultCompanyName())
@@ -412,6 +434,86 @@ export default function Settings() {
     savePaymentsMutation.mutate()
   }
 
+  const onSaveCredentials = async (e) => {
+    e.preventDefault()
+    setAdminCredMessage(null)
+    const trimmedEmail = adminEmail.trim()
+    if (!trimmedEmail) {
+      setAdminCredMessage({ type: "err", text: "Please enter an email address." })
+      return
+    }
+    if (!trimmedEmail.includes("@")) {
+      setAdminCredMessage({ type: "err", text: "Please enter a valid email address." })
+      return
+    }
+
+    if (newPassword) {
+      if (newPassword.length < 6) {
+        setAdminCredMessage({ type: "err", text: "New password must be at least 6 characters." })
+        return
+      }
+      if (newPassword !== confirmPassword) {
+        setAdminCredMessage({ type: "err", text: "New password and confirmation do not match." })
+        return
+      }
+    }
+
+    const emailChanged = trimmedEmail.toLowerCase() !== (user?.email || "").toLowerCase()
+    const passwordChanged = Boolean(newPassword)
+
+    if (!emailChanged && !passwordChanged) {
+      setAdminCredMessage({ type: "err", text: "No changes detected. Enter a new email or password." })
+      return
+    }
+
+    if (!token) {
+      setAdminCredMessage({ type: "err", text: "You must be signed in to change credentials." })
+      return
+    }
+
+    setIsSavingCreds(true)
+    try {
+      /** @type {{ email?: string, password?: string, currentPassword?: string }} */
+      const payload = {}
+      if (emailChanged) payload.email = trimmedEmail
+      if (passwordChanged) {
+        payload.password = newPassword
+        if (currentPassword.trim()) payload.currentPassword = currentPassword.trim()
+      }
+
+      const result = await updateAdminCredentials(token, payload)
+      if (!result.ok) {
+        setAdminCredMessage({ type: "err", text: result.error || "Failed to update credentials." })
+        return
+      }
+
+      if (result.user && updateSession) {
+        updateSession(result.user, result.token)
+      }
+
+      setCurrentPassword("")
+      setNewPassword("")
+      setConfirmPassword("")
+      queryClient.invalidateQueries({ queryKey: ["teamUsers"] })
+      queryClient.invalidateQueries({ queryKey: ["auditLogs"] })
+
+      const msg =
+        emailChanged && passwordChanged
+          ? "Admin email and password updated successfully."
+          : emailChanged
+            ? "Admin email updated successfully."
+            : "Admin password updated successfully."
+      setAdminCredMessage({ type: "ok", text: msg })
+    } catch (err) {
+      setAdminCredMessage({
+        type: "err",
+        text: err instanceof Error ? err.message : "Failed to update credentials.",
+      })
+    } finally {
+      setIsSavingCreds(false)
+    }
+  }
+
   const isDark = theme === "dark"
   const effectiveRate =
     typeof loadedRate === "number" ? loadedRate : getSalesAgentCommissionRate()
@@ -420,8 +522,102 @@ export default function Settings() {
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="WiFi group, company profile, sales agent commission, and appearance."
+        description="Admin account credentials, WiFi group, company profile, commissions, and appearance."
       />
+
+      {/* Administrator Account (Email & Password) */}
+      <Card className="border-border/80 shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base">Administrator account</CardTitle>
+          <CardDescription>
+            Change your administrator email and login password anytime.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={onSaveCredentials} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-email">Admin email</Label>
+              <Input
+                id="admin-email"
+                type="email"
+                autoComplete="email"
+                value={adminEmail}
+                onChange={(e) => setAdminEmail(e.target.value)}
+                disabled={isSavingCreds}
+                placeholder="admin@system.com"
+                required
+              />
+              <p className="text-muted-foreground text-xs">
+                The email used to log in to this administrator dashboard.
+              </p>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="admin-new-password">New password</Label>
+                <PasswordField
+                  id="admin-new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  disabled={isSavingCreds}
+                  placeholder="Leave empty to keep current password"
+                  autoComplete="new-password"
+                />
+                <p className="text-muted-foreground text-xs">
+                  Minimum 6 characters. Leave blank if not changing.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="admin-confirm-password">Confirm new password</Label>
+                <PasswordField
+                  id="admin-confirm-password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  disabled={isSavingCreds || !newPassword}
+                  placeholder="Re-enter new password"
+                  autoComplete="new-password"
+                />
+                <p className="text-muted-foreground text-xs">
+                  Must match the new password above.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-current-password">Current password (optional)</Label>
+              <PasswordField
+                id="admin-current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                disabled={isSavingCreds}
+                placeholder="Optional verification"
+                autoComplete="current-password"
+              />
+              <p className="text-muted-foreground text-xs">
+                Optionally enter your current password for extra verification.
+              </p>
+            </div>
+
+            <Button type="submit" disabled={isSavingCreds}>
+              {isSavingCreds ? "Saving credentials…" : "Save account changes"}
+            </Button>
+
+            {adminCredMessage ? (
+              <p
+                className={
+                  adminCredMessage.type === "ok"
+                    ? "text-sm text-emerald-600 dark:text-emerald-400"
+                    : "text-sm text-destructive"
+                }
+                role="status"
+              >
+                {adminCredMessage.text}
+              </p>
+            ) : null}
+          </form>
+        </CardContent>
+      </Card>
 
       <Card className="border-border/80 shadow-sm">
         <CardHeader>

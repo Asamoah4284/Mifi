@@ -6,6 +6,7 @@ import { mongoHttpError } from "../lib/mongoHttpError.js"
 import { normalizeGhanaPhone } from "../lib/ghanaPhone.js"
 import { createOrganization } from "../lib/organizations.js"
 import { seedOrgAppSettings } from "../lib/appSettings.js"
+import { appendAuditLog } from "../lib/appendAuditLog.js"
 import { OTP_RESEND_COOLDOWN_MS, OTP_TTL_MS, SignupOtpStore } from "../lib/signupOtpStore.js"
 import { sendSms } from "../services/sms.js"
 import { UserStore } from "../userStore.js"
@@ -18,9 +19,18 @@ import { UserStore } from "../userStore.js"
  *   jwtExpiresIn: string
  *   organizations: import("mongodb").Collection
  *   appSettings?: import("mongodb").Collection
+ *   auditLogs?: import("mongodb").Collection
  * }} deps
  */
-export function createAuthRouter({ userStore, signupOtpStore, jwtSecret, jwtExpiresIn, organizations, appSettings }) {
+export function createAuthRouter({
+  userStore,
+  signupOtpStore,
+  jwtSecret,
+  jwtExpiresIn,
+  organizations,
+  appSettings,
+  auditLogs,
+}) {
   const router = express.Router()
 
   function signToken(user) {
@@ -225,6 +235,109 @@ export function createAuthRouter({ userStore, signupOtpStore, jwtSecret, jwtExpi
         }
       }
       return res.json({ user, ...(organization ? { organization } : {}) })
+    } catch (err) {
+      const name =
+        err !== null && typeof err === "object" && "name" in err && typeof err.name === "string"
+          ? err.name
+          : ""
+      if (name === "JsonWebTokenError" || name === "TokenExpiredError" || name === "NotBeforeError") {
+        return res.status(401).json({ error: "Invalid or expired token." })
+      }
+      console.error(err)
+      const { status, error } = mongoHttpError(err)
+      return res.status(status).json({ error })
+    }
+  })
+
+  /**
+   * PATCH /api/auth/credentials
+   * Update admin email, name, and/or password anytime.
+   */
+  router.patch("/credentials", async (req, res) => {
+    try {
+      const header = req.headers.authorization || ""
+      const token = header.startsWith("Bearer ") ? header.slice(7) : null
+      if (!token) {
+        return res.status(401).json({ error: "Missing token." })
+      }
+      const decoded = jwt.verify(token, jwtSecret)
+      if (typeof decoded !== "object" || decoded === null || typeof decoded.sub !== "string") {
+        return res.status(401).json({ error: "Invalid token." })
+      }
+
+      const userDoc = await userStore.getUserById(decoded.sub)
+      if (!userDoc) {
+        return res.status(404).json({ error: "User not found." })
+      }
+      if (userDoc.active === false) {
+        return res.status(403).json({ error: "This account is deactivated." })
+      }
+
+      const currentPassword =
+        typeof req.body?.currentPassword === "string" ? req.body.currentPassword.trim() : ""
+      if (currentPassword) {
+        if (!bcrypt.compareSync(currentPassword, userDoc.passwordHash)) {
+          return res.status(400).json({ error: "Current password is incorrect." })
+        }
+      }
+
+      const emailRaw = typeof req.body?.email === "string" ? req.body.email.trim() : ""
+      if (emailRaw && !emailRaw.includes("@")) {
+        return res.status(400).json({ error: "A valid email is required." })
+      }
+
+      const passwordRaw = typeof req.body?.password === "string" ? req.body.password : ""
+      if (passwordRaw && passwordRaw.length < 6) {
+        return res.status(400).json({ error: "New password must be at least 6 characters." })
+      }
+
+      const nameRaw = typeof req.body?.name === "string" ? req.body.name.trim() : ""
+      if (nameRaw && nameRaw.length < 2) {
+        return res.status(400).json({ error: "Name must be at least 2 characters." })
+      }
+
+      if (!emailRaw && !passwordRaw && !nameRaw) {
+        return res.status(400).json({ error: "No changes provided." })
+      }
+
+      const saltRounds = Number(process.env.BCRYPT_SALT_ROUNDS) || 10
+      /** @type {{ email?: string, password?: string, name?: string, saltRounds?: number }} */
+      const patch = {}
+      if (emailRaw) patch.email = emailRaw
+      if (passwordRaw) patch.password = passwordRaw
+      if (nameRaw) patch.name = nameRaw
+      patch.saltRounds = saltRounds
+
+      const updated = await userStore.updateCredentials(userDoc.id, patch)
+      if (updated === "exists") {
+        return res.status(409).json({ error: "An account with this email already exists." })
+      }
+      if (updated === "not_found" || !updated) {
+        return res.status(404).json({ error: "User not found." })
+      }
+
+      if (auditLogs) {
+        const changes = []
+        if (emailRaw && emailRaw !== userDoc.email) changes.push(`email to "${emailRaw}"`)
+        if (passwordRaw) changes.push("password")
+        if (nameRaw && nameRaw !== userDoc.name) changes.push(`name to "${nameRaw}"`)
+        if (changes.length > 0) {
+          await appendAuditLog(
+            auditLogs,
+            { name: updated.name, email: updated.email, orgId: updated.orgId },
+            `Admin updated ${changes.join(" and ")}`,
+          )
+        }
+      }
+
+      const freshToken = signToken(updated)
+      const publicUser = toPublicUser(updated)
+      return res.json({
+        ok: true,
+        user: publicUser,
+        token: freshToken,
+        message: "Credentials updated successfully.",
+      })
     } catch (err) {
       const name =
         err !== null && typeof err === "object" && "name" in err && typeof err.name === "string"
