@@ -107,7 +107,7 @@ export default function CaptiveBuy() {
   const [locations, setLocations] = React.useState(/** @type {{ locationId: string, name: string }[]} */ ([]))
   const [enquiryPhone, setEnquiryPhone] = React.useState("")
   const [packages, setPackages] = React.useState(
-    /** @type {{ packageId: string, name: string, priceGHS: number, dataLimit: string, remaining: number }[]} */ ([]),
+    /** @type {{ packageId: string, name: string, priceGHS: number, dataLimit: string, validity?: string, remaining: number }[]} */ ([]),
   )
   const [locationId, setLocationId] = React.useState("")
   const [locationName, setLocationName] = React.useState("")
@@ -565,6 +565,11 @@ export default function CaptiveBuy() {
                         </p>
                         {pkg.dataLimit ? (
                           <p className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{pkg.dataLimit}</p>
+                        ) : null}
+                        {pkg.validity ? (
+                          <p className="mt-1 inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                            {pkg.validity}
+                          </p>
                         ) : null}
                       </div>
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-400 transition-all group-hover:bg-[#02a145] group-hover:text-white dark:bg-slate-800 dark:text-slate-400">

@@ -9,13 +9,14 @@
  *
  * @param {import("mongodb").Document | null | undefined} pkg
  * @param {string} locationId
- * @returns {{ name: string, priceGHS: number, dataLimit: string, status: string }}
+ * @returns {{ name: string, priceGHS: number, dataLimit: string, status: string, validity: string }}
  */
 export function resolvePackageForLocation(pkg, locationId) {
   const fallbackName = typeof pkg?.name === "string" ? pkg.name : ""
   const fallbackPrice = Number(pkg?.priceGHS)
   const fallbackDataLimit = typeof pkg?.dataLimit === "string" ? pkg.dataLimit : ""
   const fallbackStatus = typeof pkg?.status === "string" ? pkg.status : ""
+  const validity = typeof pkg?.validity === "string" ? pkg.validity.trim() : ""
 
   const overrides = pkg?.locationOverrides
   const override =
@@ -29,6 +30,7 @@ export function resolvePackageForLocation(pkg, locationId) {
       priceGHS: Number.isFinite(fallbackPrice) ? fallbackPrice : 0,
       dataLimit: fallbackDataLimit,
       status: fallbackStatus,
+      validity,
     }
   }
 
@@ -51,5 +53,6 @@ export function resolvePackageForLocation(pkg, locationId) {
       typeof override.status === "string" && override.status.trim()
         ? override.status.trim()
         : fallbackStatus,
+    validity,
   }
 }
