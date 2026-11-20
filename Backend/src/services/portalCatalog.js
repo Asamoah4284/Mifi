@@ -66,7 +66,6 @@ export async function getPortalPackagesForLocation(packagesCol, locationId, opts
       name: resolved.name && resolved.name.trim() ? resolved.name.trim() : packageId,
       priceGHS: resolved.priceGHS,
       dataLimit: resolved.dataLimit,
-      validity: resolved.validity,
       remaining: 0,
     })
   }
@@ -155,7 +154,6 @@ export async function getPackagesForLocation(packagesCol, vouchersCol, locationI
         name: resolved.name && resolved.name.trim() ? resolved.name.trim() : packageId,
         priceGHS: resolved.priceGHS,
         dataLimit: resolved.dataLimit,
-        validity: resolved.validity,
         remaining,
       })
     }

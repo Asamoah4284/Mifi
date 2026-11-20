@@ -311,7 +311,6 @@ function toPackage(d) {
     priceGHS: d.priceGHS,
     currency: typeof d.currency === "string" && d.currency.trim() ? d.currency.trim() : "GHS",
     dataLimit: d.dataLimit,
-    validity: typeof d.validity === "string" ? d.validity : "",
     status: d.status,
     stockUnits: d.stockUnits,
     radiusSessionTimeout:
@@ -344,14 +343,6 @@ function parsePackageExtraFields(body, opts = {}) {
     if (!description) return { ok: false, error: "Description is required." }
     if (description.length > 280) return { ok: false, error: "Description must be 280 characters or less." }
     fields.description = description
-  }
-
-  // Optional customer-facing note such as "Valid for 14 days". Kept separate from dataLimit so it
-  // never feeds RADIUS session-time inference (which reads durations out of the dataLimit text).
-  if (Object.prototype.hasOwnProperty.call(body, "validity")) {
-    const validity = typeof body.validity === "string" ? body.validity.trim() : ""
-    if (validity.length > 60) return { ok: false, error: "Validity must be 60 characters or less." }
-    fields.validity = validity
   }
 
   const hasTimeout = Object.prototype.hasOwnProperty.call(body, "radiusSessionTimeout")

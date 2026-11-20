@@ -1002,7 +1002,6 @@ export async function sendCustomersSms(token, body) {
  *   name: string
  *   priceGHS: number
  *   dataLimit: string
- *   validity?: string
  *   status: string
  *   description: string
  *   radiusSessionTimeout: number
@@ -1039,7 +1038,6 @@ export async function createCatalogPackage(token, body) {
  *   name?: string
  *   priceGHS?: number
  *   dataLimit?: string
- *   validity?: string
  *   status?: string
  *   description?: string
  *   radiusSessionTimeout?: number

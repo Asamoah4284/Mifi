@@ -152,7 +152,6 @@ export default function Packages() {
     description: "",
     priceGHS: "",
     dataLimit: "",
-    validity: "",
     status: "Active",
     sessionHours: "",
     dataCapGb: "",
@@ -207,7 +206,6 @@ export default function Packages() {
         description: form.description.trim(),
         priceGHS: price,
         dataLimit: form.dataLimit.trim(),
-        validity: form.validity.trim(),
         status: form.status,
         radiusSessionTimeout,
         radiusMaxOctets,
@@ -572,7 +570,6 @@ export default function Packages() {
       description: String(row.description ?? ""),
       priceGHS: String(row.priceGHS),
       dataLimit: row.dataLimit,
-      validity: String(row.validity ?? ""),
       status: row.status,
       sessionHours,
       dataCapGb,
@@ -1301,19 +1298,6 @@ export default function Packages() {
                 required
               />
               <p className="text-muted-foreground text-xs">Shown to customers on SMS and menus.</p>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="pkg-validity">Validity (optional)</Label>
-              <Input
-                id="pkg-validity"
-                value={form.validity}
-                onChange={(e) => setForm((f) => ({ ...f, validity: e.target.value }))}
-                placeholder="e.g. Valid for 14 days"
-                maxLength={60}
-              />
-              <p className="text-muted-foreground text-xs">
-                Shown as a tag under the package on the WiFi portal. Leave blank to hide.
-              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="pkg-session">Session duration (hours)</Label>

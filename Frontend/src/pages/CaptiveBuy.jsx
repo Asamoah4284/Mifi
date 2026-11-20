@@ -97,6 +97,19 @@ function PromoBanner({ promo }) {
 
 const PACKAGES_PER_PAGE = 4
 
+/** Display-only validity tags, keyed by package name (letters only, uppercased). */
+const PACKAGE_VALIDITY_TAGS = {
+  DAILYHUSTLE: "Valid for 14 days",
+  WEEKENDFLEX: "Valid for 14 days",
+  WEEKLYBOSS: "Valid for 14 days",
+}
+
+/** @param {string} name */
+function packageValidityTag(name) {
+  const key = String(name || "").toUpperCase().replace(/[^A-Z]/g, "")
+  return PACKAGE_VALIDITY_TAGS[key] || ""
+}
+
 export default function CaptiveBuy() {
   const appName = getDefaultAppName()
   const navigate = useNavigate()
@@ -107,7 +120,7 @@ export default function CaptiveBuy() {
   const [locations, setLocations] = React.useState(/** @type {{ locationId: string, name: string }[]} */ ([]))
   const [enquiryPhone, setEnquiryPhone] = React.useState("")
   const [packages, setPackages] = React.useState(
-    /** @type {{ packageId: string, name: string, priceGHS: number, dataLimit: string, validity?: string, remaining: number }[]} */ ([]),
+    /** @type {{ packageId: string, name: string, priceGHS: number, dataLimit: string, remaining: number }[]} */ ([]),
   )
   const [locationId, setLocationId] = React.useState("")
   const [locationName, setLocationName] = React.useState("")
@@ -566,9 +579,9 @@ export default function CaptiveBuy() {
                         {pkg.dataLimit ? (
                           <p className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{pkg.dataLimit}</p>
                         ) : null}
-                        {pkg.validity ? (
+                        {packageValidityTag(pkg.name) ? (
                           <p className="mt-1 inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-                            {pkg.validity}
+                            {packageValidityTag(pkg.name)}
                           </p>
                         ) : null}
                       </div>
